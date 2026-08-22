@@ -25,6 +25,14 @@ namespace MaxyGames.UNode.Editors {
 	}
 
 	public partial class ItemSelector {
+		/// <summary>
+		/// Exposes the relevance scoring used by the item selector search
+		/// (camelCase / word-boundary aware) to other editor windows.
+		/// Returns a score in [0, 1], or -1 when the target doesn't match.
+		/// </summary>
+		public static float GetRelevanceScore(string query, string target) {
+			return TreeSearcher.Relevance(query, target);
+		}
 		#region Search
 		abstract class TreeSearcher {
 			public virtual float IsMatchSearch(TViewItem tree, string[] splittedStrings, SearchKind searchKind, SearchFilter searchFilter) {

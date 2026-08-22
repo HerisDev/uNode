@@ -38,6 +38,8 @@ namespace MaxyGames.UNode.Editors {
 			public bool isVirtualChild;
 			public List<DisplayEntry> children;
 			public int memberCount;
+			public float searchScore;   // relevance score (search mode only)
+			public string searchPath;   // breadcrumb path shown under the title in search mode
 		}
 
 		private int nextTreeID = 1;
@@ -213,20 +215,13 @@ namespace MaxyGames.UNode.Editors {
 			if(allEntries == null || allEntries.Count == 0)
 				return new List<TreeViewItemData<DisplayEntry>>();
 
-			// Apply search filter — only prune non-ancestor nodes; keep ancestors of matches.
-			HashSet<string> keptEntryIDs = null;
-			if(!string.IsNullOrEmpty(searchString)) {
-				keptEntryIDs = new HashSet<string>();
-				string lower = searchString.ToLowerInvariant();
-				foreach(var e in allEntries) {
-					if(MatchesSearch(e, lower))
-						MarkAncestors(e, allEntries, keptEntryIDs);
-				}
-			}
+			// Search mode: flatten every matching entry into one relevance-ranked list
+			// (mirrors ItemSelector's SearchKind.Relevant results).
+			if(!string.IsNullOrEmpty(searchString))
+				return BuildFlatSearchRows(allEntries);
 
 			// Group children by parentID.
 			var childrenOf = allEntries
-				.Where(e => keptEntryIDs == null || keptEntryIDs.Contains(e.id))
 				.GroupBy(e => e.parentID ?? string.Empty)
 				.ToDictionary(g => g.Key, g => g.OrderBy(x => x.orderIndex).ToList());
 
@@ -284,22 +279,104 @@ namespace MaxyGames.UNode.Editors {
 			return roots;
 		}
 
-		bool MatchesSearch(FavoritesDataAsset.Entry e, string lower) {
-			var name = GetDisplayName(e);
-			if(name != null && name.ToLowerInvariant().Contains(lower))
-				return true;
-			if(e.typeName != null && e.typeName.ToLowerInvariant().Contains(lower))
-				return true;
-			return false;
+		/// <summary>
+		/// Builds the flat relevance-ranked search list (mirrors ItemSelector's
+		/// SearchKind.Relevant results): every matching entry is scored via
+		/// ItemSelector's TreeSearcher, sorted by score, and shown without hierarchy.
+		/// Folders/namespaces act as path breadcrumbs rather than rows.
+		/// </summary>
+		List<TreeViewItemData<DisplayEntry>> BuildFlatSearchRows(List<FavoritesDataAsset.Entry> allEntries) {
+			var results = new List<DisplayEntry>();
+
+			IEnumerable<FavoritesDataAsset.Entry> ChildrenOf(string id) =>
+				allEntries.Where(c => c.parentID == id).OrderBy(x => x.orderIndex);
+
+			static string JoinPath(string parentPath, string segment) =>
+				string.IsNullOrEmpty(parentPath) ? segment : parentPath + " > " + segment;
+
+			void AddResult(FavoritesDataAsset.Entry e, string path) {
+				float score = ScoreSearchTarget(e);
+				if(score < 0f)
+					return; // no relevance match
+				int id = nextTreeID++;
+				var de = new DisplayEntry {
+					treeID = id,
+					entry = e,
+					isVirtualChild = e.isVirtual,
+					searchScore = score,
+					searchPath = path ?? string.Empty,
+				};
+				treeIDMap[id] = de;
+				results.Add(de);
+				visibleRows.Add(new VisibleRow {
+					entry = e,
+					depth = 0,
+					parentID = string.Empty,
+					isLastChild = false,
+					inNamespace = false,
+				});
+			}
+
+			void CollectEntry(FavoritesDataAsset.Entry e, string parentPath) {
+				string name = GetDisplayName(e);
+				switch(e.kind) {
+					case FavoriteKind.Folder:
+						var folderPath = JoinPath(parentPath, name);
+						foreach(var c in ChildrenOf(e.id))
+							CollectEntry(c, folderPath);
+						break;
+					case FavoriteKind.Namespace: {
+						var nsPath = JoinPath(parentPath, name);
+						foreach(var c in ChildrenOf(e.id))
+							CollectEntry(c, nsPath);
+						// Virtual types from the namespace expansion are searchable too.
+						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(name))
+							AddResult(vc, nsPath);
+						break;
+					}
+					default:
+						AddResult(e, parentPath);
+						if(e.kind == FavoriteKind.Type && !e.isVirtual) {
+							var typePath = JoinPath(parentPath, name);
+							foreach(var c in ChildrenOf(e.id))
+								CollectEntry(c, typePath);
+						}
+						break;
+				}
+			}
+
+			var knownIDs = new HashSet<string>(allEntries.Select(x => x.id));
+			foreach(var root in ChildrenOf(string.Empty)) {
+				CollectEntry(root, null);
+			}
+			// Orphans (broken parent links) are walked as roots so they stay searchable.
+			foreach(var orphan in allEntries.Where(e => !string.IsNullOrEmpty(e.parentID) && !knownIDs.Contains(e.parentID))) {
+				CollectEntry(orphan, null);
+			}
+
+			results.Sort((a, b) => {
+				int c = b.searchScore.CompareTo(a.searchScore);
+				if(c != 0) return c;
+				return a.entry.orderIndex.CompareTo(b.entry.orderIndex);
+			});
+
+			return results.Select(de => new TreeViewItemData<DisplayEntry>(de.treeID, de)).ToList();
 		}
 
-		void MarkAncestors(FavoritesDataAsset.Entry e, List<FavoritesDataAsset.Entry> all, HashSet<string> kept) {
-			kept.Add(e.id);
-			if(string.IsNullOrEmpty(e.parentID)) return;
-			if(kept.Contains(e.parentID)) return;
-			var parent = all.FirstOrDefault(x => x.id == e.parentID);
-			if(parent != null)
-				MarkAncestors(parent, all, kept);
+		float ScoreSearchTarget(FavoritesDataAsset.Entry e) {
+			float best = -1f;
+			string query = searchString;
+			void Consider(string str) {
+				if(string.IsNullOrEmpty(str)) return;
+				var s = ItemSelector.GetRelevanceScore(query, str);
+				if(s > best) best = s;
+			}
+			Consider(GetDisplayName(e));
+			if(e.kind == FavoriteKind.Member)
+				Consider(e.memberName);
+			else if(e.typeName != null)
+				Consider(e.typeName.Split('.').Last());
+			return best;
 		}
 
 		// ═══════════════════════════════════════
@@ -518,6 +595,27 @@ namespace MaxyGames.UNode.Editors {
 				// bindItem) to avoid stacking duplicate manipulators on rebind.
 				makeItem: () => {
 					var item = new PanelElement<FavoritesDataAsset.Entry>();
+					item.style.alignItems = Align.Center;
+					// Stretch the row content to fully fill the recycled TreeView item
+					// (fixedItemHeight) so there is no dead space above/below the
+					// content — keeps hover highlight and drag hit-testing full height.
+					item.style.flexGrow = 1;
+					item.style.height = Length.Percent(100);
+					// Two-line layout: title on top, breadcrumb path below.
+					// The path label stays hidden outside search mode.
+					var textColumn = new VisualElement { name = "text-column" };
+					textColumn.pickingMode = PickingMode.Ignore;
+					textColumn.style.flexDirection = FlexDirection.Column;
+					textColumn.style.flexGrow = 1;
+					textColumn.style.justifyContent = Justify.Center;
+					textColumn.Add(item.label);
+					var pathLabel = new Label(string.Empty) { name = "path-label" };
+					pathLabel.pickingMode = PickingMode.Ignore;
+					pathLabel.style.fontSize = 9;
+					pathLabel.style.color = new Color(0.55f, 0.55f, 0.55f);
+					pathLabel.style.display = DisplayStyle.None;
+					textColumn.Add(pathLabel);
+					item.Add(textColumn);
 					item.AddManipulator(new ContextualMenuManipulator(evt => BuildRowContextMenu(evt, item.userData as DisplayEntry)));
 					return item;
 				},
@@ -531,10 +629,12 @@ namespace MaxyGames.UNode.Editors {
 					item.userData = de;
 
 					// Drag behavior: virtual rows are read-only (non-draggable, no drop inside).
+					// Reordering is also disabled while searching (flat relevance view).
 					bool isVirtual = de.isVirtualChild || de.entry.isVirtual;
-					item.CanDragFunc = () => !isVirtual;
-					item.CanDragInsideParentFunc = () => !isVirtual;
-					item.CanHaveChildsFunc = () => de.entry.kind == FavoriteKind.Folder && !de.entry.isVirtual;
+					bool hasSearch = !string.IsNullOrEmpty(searchString);
+					item.CanDragFunc = () => !isVirtual && !hasSearch;
+					item.CanDragInsideParentFunc = () => !isVirtual && !hasSearch;
+					item.CanHaveChildsFunc = () => de.entry.kind == FavoriteKind.Folder && !de.entry.isVirtual && !hasSearch;
 
 					// Set drag payload (null for virtual rows = read-only).
 					item.GetDragGenericData = () => {
@@ -575,6 +675,14 @@ namespace MaxyGames.UNode.Editors {
 						item.icon.style.height = 16;
 						item.icon.style.flexShrink = 0;
 					}
+
+					// Search mode shows the breadcrumb path under the title.
+					var pathLabel = item.Q<Label>("path-label");
+					if(pathLabel != null) {
+						bool showPath = hasSearch && !string.IsNullOrEmpty(de.searchPath);
+						pathLabel.text = de.searchPath ?? string.Empty;
+						pathLabel.style.display = showPath ? DisplayStyle.Flex : DisplayStyle.None;
+					}
 				}
 			);
 			// Handle selection manually (like GraphPanel) so clicks don't conflict
@@ -594,6 +702,8 @@ namespace MaxyGames.UNode.Editors {
 			// we resolve parent + sibling from it, validate, persist, and rebuild.
 			dragger.dragAndDropController = new FavoritesReorderController(entryTreeView, (movedID, insertIndex, overItem) => {
 				if(string.IsNullOrEmpty(movedID)) return;
+				// No reordering while searching (flat relevance view).
+				if(!string.IsNullOrEmpty(searchString)) return;
 				string parentID;
 				int siblingIndex;
 				if(overItem) {
@@ -666,6 +776,9 @@ namespace MaxyGames.UNode.Editors {
 
 		void ReloadTreeView() {
 			var items = BuildTreeData();
+			// Search rows are double height to fit the title + path description
+			// (same as ItemSelector's relevance results).
+			entryTreeView.fixedItemHeight = string.IsNullOrEmpty(searchString) ? 20 : 40;
 			entryTreeView.SetRootItems(items);
 			entryTreeView.Rebuild();
 			UpdateStatusLabel();
