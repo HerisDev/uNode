@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.UIElements;
@@ -16,6 +18,7 @@ namespace MaxyGames.UNode.Editors {
 		private Toolbar toolbar;
 		private DropdownField categoryDropdown;
 		private TextField searchField;
+		private ProgressBar searchProgressBar;
 		private TreeView entryTreeView;
 		private Label statusLabel;
 		private VisualElement detailArea;
@@ -32,6 +35,14 @@ namespace MaxyGames.UNode.Editors {
 		private Dictionary<string, NodeMenu> nodeMenuCache;
 		private Dictionary<int, DisplayEntry> treeIDMap = new Dictionary<int, DisplayEntry>();
 
+		// ── Background search ──
+		private CancellationTokenSource _searchCts;
+		private int _searchGeneration;
+
+		/// <summary>Minimum query length before deep member search kicks in.</summary>
+		const int MinDeepQueryLength = 3;
+		static readonly BindingFlags s_DeepMemberFlags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
 		class DisplayEntry {
 			public int treeID;
 			public FavoritesDataAsset.Entry entry;
@@ -40,6 +51,30 @@ namespace MaxyGames.UNode.Editors {
 			public int memberCount;
 			public float searchScore;   // relevance score (search mode only)
 			public string searchPath;   // breadcrumb path shown under the title in search mode
+		}
+
+		/// <summary>
+		/// Main-thread snapshot of one entry: everything the background search needs.
+		/// The worker only reads these plain fields — it never touches Unity
+		/// serialized/native APIs (SerializedType, MemberData, icons).
+		/// </summary>
+		class SearchItem {
+			public FavoritesDataAsset.Entry entry;  // managed ref, read-only on worker
+			public string id;
+			public string parentID;
+			public int orderIndex;
+			public FavoriteKind kind;
+			public bool isVirtual;
+			public string displayName;      // plain text used for scoring/paths
+			public string shortTypeName;    // last segment of typeName (fallback scoring)
+			public Type resolvedRuntimeType; // captured on the UI thread for deep member search
+		}
+
+		/// <summary>Immutable payload produced by the background search task.</summary>
+		class SearchResult {
+			public List<TreeViewItemData<DisplayEntry>> items = new List<TreeViewItemData<DisplayEntry>>();
+			public Dictionary<int, DisplayEntry> treeIDMap = new Dictionary<int, DisplayEntry>();
+			public List<VisibleRow> rows = new List<VisibleRow>();
 		}
 
 		private int nextTreeID = 1;
@@ -84,6 +119,13 @@ namespace MaxyGames.UNode.Editors {
 				window = null;
 			FavoritesManager.onChanged -= OnFavoritesChanged;
 			rootVisualElement?.UnregisterCallback<KeyDownEvent>(OnWindowKeyDown);
+			// Invalidate any in-flight background search so its apply is rejected.
+			CancelPendingSearch();
+		}
+
+		void CancelPendingSearch() {
+			_searchGeneration++;
+			try { _searchCts?.Cancel(); } catch { }
 		}
 
 		void OnWindowKeyDown(KeyDownEvent evt) {
@@ -390,6 +432,333 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		// ═══════════════════════════════════════
+		//  Background Search
+		// ═══════════════════════════════════════
+		// Search runs on a worker thread: the UI thread snapshots plain strings,
+		// the task does pure CPU work (scoring/paths/sorting), and results are
+		// applied back on the UI thread. Stale generations are discarded, so
+		// rapid typing self-cancels.
+
+		void OnSearchChanged(string value) {
+			searchString = value;
+			CancelPendingSearch();
+			if(string.IsNullOrEmpty(value)) {
+				HideSearchProgress();
+				// Instant restore of the hierarchy — no worker needed.
+				ReloadTreeView();
+				return;
+			}
+			int generation = ++_searchGeneration;
+			_searchCts = new CancellationTokenSource();
+			var token = _searchCts.Token;
+
+			ShowSearchProgress();
+			// Progress<T> marshals reports onto the UI thread it was created on.
+			var progress = new Progress<float>(v => UpdateSearchProgress(v));
+
+			// Snapshot phase (UI thread): capture all strings the worker needs.
+			var snapshot = BuildSearchSnapshot();
+
+			Task.Run(() => ComputeFlatSearchInBackground(snapshot, value, token, progress))
+				.ContinueWith(t => {
+					if(t.Status == TaskStatus.Faulted) {
+						// Surface unexpected worker failures (cancellations stay silent).
+						Debug.LogException(t.Exception?.InnerException ?? t.Exception);
+						HideSearchProgress();
+						return;
+					}
+					if(t.Status != TaskStatus.RanToCompletion)
+						return; // canceled — a newer search superseded it
+					ApplyBackgroundResult(generation, t.Result);
+				}, TaskScheduler.FromCurrentSynchronizationContext());
+		}
+
+		void ShowSearchProgress() {
+			if(this == null || searchProgressBar == null)
+				return;
+			searchProgressBar.value = 0f;
+			searchProgressBar.style.display = DisplayStyle.Flex;
+		}
+
+		/// <summary>Worker reports 0..0.9; the bar never completes until results apply.</summary>
+		void UpdateSearchProgress(float fraction) {
+			if(this == null || searchProgressBar == null)
+				return;
+			searchProgressBar.value = Mathf.Clamp01(fraction) * 95f;
+		}
+
+		void HideSearchProgress() {
+			if(this == null || searchProgressBar == null)
+				return;
+			searchProgressBar.style.display = DisplayStyle.None;
+		}
+
+		List<SearchItem> BuildSearchSnapshot() {
+			var snapshot = new List<SearchItem>();
+			if(string.IsNullOrEmpty(currentCategoryID))
+				return snapshot;
+			foreach(var e in FavoritesManager.asset.entries) {
+				if(e.categoryID != currentCategoryID || e.isVirtual)
+					continue;
+				string displayName;
+				if(e.kind == FavoriteKind.Member) {
+					displayName = e.memberName ?? "(missing)";
+				} else {
+					try { displayName = GetDisplayName(e); }
+					catch { displayName = e.displayName ?? e.id; }
+				}
+				snapshot.Add(new SearchItem {
+					entry = e,
+					id = e.id,
+					parentID = e.parentID ?? string.Empty,
+					orderIndex = e.orderIndex,
+					kind = e.kind,
+					isVirtual = false,
+					displayName = displayName,
+					shortTypeName = e.typeName?.Split('.').Last(),
+					resolvedRuntimeType = e.kind == FavoriteKind.Type ? ResolveEntryType(e) : null,
+				});
+			}
+			return snapshot;
+		}
+
+		/// <summary>
+		/// Worker: builds the flat relevance-ranked result from the snapshot.
+		/// Pure string/CPU work only — no Unity native APIs are touched.
+		/// </summary>
+		SearchResult ComputeFlatSearchInBackground(List<SearchItem> snapshot, string query, CancellationToken token, IProgress<float> progress) {
+			var result = new SearchResult();
+			int nextTreeID = 1;
+			progress?.Report(0f);
+
+			var byParent = snapshot
+				.GroupBy(i => i.parentID)
+				.ToDictionary(g => g.Key, g => g.OrderBy(x => x.orderIndex).ToList());
+
+			IEnumerable<SearchItem> ChildrenOf(string id) =>
+				byParent.TryGetValue(id, out var list) ? list : Enumerable.Empty<SearchItem>();
+
+			static string JoinPath(string parentPath, string segment) =>
+				string.IsNullOrEmpty(parentPath) ? segment : parentPath + " > " + segment;
+
+			// Deep search: "trans pos" matches Transform members named like "pos".
+			var queryParts = query.Split(new[] { '.', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+			bool deepSearch = query.Length >= MinDeepQueryLength;
+
+			float Score(SearchItem item) {
+				float best = -1f;
+				void Consider(string s) {
+					if(string.IsNullOrEmpty(s)) return;
+					var v = ItemSelector.GetRelevanceScore(query, s);
+					if(v > best) best = v;
+				}
+				// displayName is precomputed as plain text (member name for members).
+				Consider(item.displayName);
+				Consider(item.shortTypeName);
+				return best;
+			}
+
+			/// Scores a member name during deep search: multi-part queries match the
+			/// trailing parts against the member; otherwise the full query is used.
+			float ScoreMemberName(string name) {
+				if(string.IsNullOrEmpty(name)) return -1f;
+				if(queryParts.Length >= 2) {
+					float best = -1f;
+					for(int i = 1; i < queryParts.Length; i++) {
+						var v = ItemSelector.GetRelevanceScore(queryParts[i], name);
+						if(v > best) best = v;
+					}
+					return best;
+				}
+				return ItemSelector.GetRelevanceScore(query, name);
+			}
+
+			var results = new List<DisplayEntry>();
+			// Dedupes member results across sources (persisted children, deep search).
+			var seenMemberKeys = new HashSet<string>();
+
+			string MemberKey(MemberInfo mi) {
+				return (mi.DeclaringType != null ? mi.DeclaringType.FullName : "") + "::" + mi.Name + "::" + mi.MetadataToken;
+			}
+
+			bool TryTrackMember(MemberInfo mi) {
+				if(mi == null) return false;
+				return seenMemberKeys.Add(MemberKey(mi));
+			}
+
+			void AddResult(SearchItem item, float score, string path) {
+				if(item.kind == FavoriteKind.Member) {
+					MemberInfo mi = null;
+					try { mi = FavoritesManager.GetEntryMember(item.entry); } catch { }
+					if(!TryTrackMember(mi))
+						return; // duplicate member (persisted child or already added)
+				}
+				int id = nextTreeID++;
+				var de = new DisplayEntry {
+					treeID = id,
+					entry = item.entry,
+					isVirtualChild = item.isVirtual,
+					searchScore = score,
+					searchPath = path ?? string.Empty,
+				};
+				result.treeIDMap[id] = de;
+				result.rows.Add(new VisibleRow {
+					entry = item.entry,
+					depth = 0,
+					parentID = string.Empty,
+					isLastChild = false,
+					inNamespace = false,
+				});
+				results.Add(de);
+			}
+
+			/// <summary>
+			/// Deep search: surfaces matching members of the given type that aren't
+			/// already favorited under it. Reflection here is pure metadata reading,
+			/// which is thread-safe; the transient entries it creates are never
+			/// persisted and resolve lazily on the UI thread when bound.
+			/// </summary>
+			void CollectTypeMembers(Type type, string typePath) {
+				if(!deepSearch || type == null)
+					return;
+				token.ThrowIfCancellationRequested();
+				MemberInfo[] members;
+				try { members = type.GetMembers(s_DeepMemberFlags); }
+				catch { return; }
+				string declName = type.FullName ?? type.Name;
+				foreach(var m in members) {
+					token.ThrowIfCancellationRequested();
+					if(m is EventInfo) continue;
+					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+					string key = declName + "::" + m.Name + "::" + m.MetadataToken;
+					if(!seenMemberKeys.Add(key)) continue;
+					float score = ScoreMemberName(m.Name);
+					if(score < 0f) continue;
+					var entry = new FavoritesDataAsset.Entry {
+						kind = FavoriteKind.Member,
+						targetMember = MemberData.CreateFromMember(m),
+						isVirtual = true,
+						displayName = m.Name,
+						id = "[deep]:" + key,
+						parentID = "[deep]",
+					};
+					AddResult(new SearchItem {
+						entry = entry,
+						id = entry.id,
+						parentID = "[deep]",
+						orderIndex = int.MaxValue, // tiebreak below persisted entries
+						kind = FavoriteKind.Member,
+						isVirtual = true,
+						displayName = m.Name,
+					}, score, typePath);
+				}
+			}
+
+			void CollectEntry(SearchItem item, string parentPath) {
+				switch(item.kind) {
+					case FavoriteKind.Folder:
+						var folderPath = JoinPath(parentPath, item.displayName);
+						foreach(var c in ChildrenOf(item.id))
+							CollectEntry(c, folderPath);
+						break;
+					case FavoriteKind.Namespace: {
+						var nsPath = JoinPath(parentPath, item.displayName);
+						foreach(var c in ChildrenOf(item.id))
+							CollectEntry(c, nsPath);
+						// Virtual types of the namespace are searchable candidates.
+						// Safe off-thread: pure reflection over loaded assemblies.
+						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(item.displayName)) {
+							token.ThrowIfCancellationRequested();
+							Type t = null;
+							float score = -1f;
+							try {
+								t = vc.targetType?.type;
+								score = Math.Max(
+									ItemSelector.GetRelevanceScore(query, t?.Name ?? vc.displayName),
+									t == null ? -1f : ItemSelector.GetRelevanceScore(query, t.FullName));
+							} catch { }
+							if(score >= 0f) {
+								AddResult(new SearchItem {
+									entry = vc,
+									id = vc.id,
+									parentID = "[ns]",
+									orderIndex = 0,
+									kind = FavoriteKind.Type,
+									isVirtual = true,
+									displayName = vc.targetType?.type?.Name ?? vc.displayName,
+								}, score, nsPath);
+							}
+							// Deep member search inside namespace types too.
+							CollectTypeMembers(t, JoinPath(nsPath, t?.Name ?? vc.displayName));
+						}
+						break;
+					}
+					default:
+						float s = Score(item);
+						if(s >= 0f)
+							AddResult(item, s, parentPath);
+						// Members grouped under a persisted type header stay searchable.
+						if(item.kind == FavoriteKind.Type && !item.isVirtual) {
+							var typePath = JoinPath(parentPath, item.displayName);
+							foreach(var c in ChildrenOf(item.id)) {
+								// Reserve persisted members so deep search won't duplicate them.
+								if(c.kind == FavoriteKind.Member) {
+									MemberInfo mi = null;
+									try { mi = FavoritesManager.GetEntryMember(c.entry); } catch { }
+									TryTrackMember(mi);
+								}
+								CollectEntry(c, typePath);
+							}
+							// Deep member search inside this favorited type.
+							CollectTypeMembers(item.resolvedRuntimeType, typePath);
+						}
+						break;
+				}
+			}
+
+			var knownIDs = new HashSet<string>(snapshot.Select(x => x.id));
+			var roots = ChildrenOf(string.Empty).ToList();
+			var orphans = snapshot.Where(x => x.parentID.Length > 0 && !knownIDs.Contains(x.parentID)).ToList();
+			int totalRoots = Math.Max(1, roots.Count + orphans.Count);
+			int processedRoots = 0;
+			foreach(var root in roots) {
+				token.ThrowIfCancellationRequested();
+				CollectEntry(root, null);
+				progress?.Report(Math.Min(processedRoots / (float)totalRoots, 0.9f));
+				processedRoots++;
+			}
+			foreach(var orphan in orphans) {
+				token.ThrowIfCancellationRequested();
+				CollectEntry(orphan, null);
+				progress?.Report(Math.Min(processedRoots / (float)totalRoots, 0.9f));
+				processedRoots++;
+			}
+
+			results.Sort((a, b) => {
+				int c = b.searchScore.CompareTo(a.searchScore);
+				if(c != 0) return c;
+				return a.entry.orderIndex.CompareTo(b.entry.orderIndex);
+			});
+
+			result.items.AddRange(results.Select(de => new TreeViewItemData<DisplayEntry>(de.treeID, de)));
+			return result;
+		}
+
+		void ApplyBackgroundResult(int generation, SearchResult result) {
+			// Reject stale results from superseded searches / closed windows.
+			if(result == null || generation != _searchGeneration || this == null || entryTreeView == null)
+				return;
+			treeIDMap = result.treeIDMap;
+			visibleRows.Clear();
+			visibleRows.AddRange(result.rows);
+			entryTreeView.fixedItemHeight = string.IsNullOrEmpty(searchString) ? 20 : 40;
+			entryTreeView.SetRootItems(result.items);
+			entryTreeView.Rebuild();
+			HideSearchProgress();
+			UpdateStatusLabel();
+		}
+
+		// ═══════════════════════════════════════
 		//  Display Helpers
 		// ═══════════════════════════════════════
 		/// <summary>
@@ -608,12 +977,20 @@ namespace MaxyGames.UNode.Editors {
 
 			// ── Search ──
 			searchField = new TextField() { name = "search", tooltip = "Search" };
-			searchField.RegisterValueChangedCallback(evt => { searchString = evt.newValue; ReloadTreeView(); });
+			searchField.RegisterValueChangedCallback(evt => OnSearchChanged(evt.newValue));
 			searchField.style.marginLeft = 4;
 			searchField.style.marginRight = 4;
 			searchField.style.marginTop = 2;
 			searchField.style.marginBottom = 2;
 			root.Add(searchField);
+
+			// ── Search progress ──
+			searchProgressBar = new ProgressBar { title = "Searching…" };
+			searchProgressBar.style.height = 24;
+			searchProgressBar.style.marginLeft = 4;
+			searchProgressBar.style.marginRight = 4;
+			searchProgressBar.style.display = DisplayStyle.None;
+			root.Add(searchProgressBar);
 
 			// ── TreeView ──
 			// Modeled after GraphPanel.DrawElements: makeItem returns a PanelElement-like
@@ -806,6 +1183,9 @@ namespace MaxyGames.UNode.Editors {
 		// ═══════════════════════════════════════
 
 		void ReloadTreeView() {
+			// Data changed — any in-flight background result is now stale.
+			CancelPendingSearch();
+			HideSearchProgress();
 			var items = BuildTreeData();
 			// Search rows are double height to fit the title + path description
 			// (same as ItemSelector's relevance results).
@@ -844,6 +1224,9 @@ namespace MaxyGames.UNode.Editors {
 			if(de.isVirtualChild || e.isVirtual) {
 				// Virtual rows are read-only; only node creation is offered.
 				if(e.kind == FavoriteKind.Type) {
+					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
+				} else if(e.kind == FavoriteKind.Member && e.targetMember != null) {
+					// Deep-search member results can spawn nodes too.
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
 				}
 				evt.StopPropagation();
@@ -1106,7 +1489,9 @@ namespace MaxyGames.UNode.Editors {
 			var kind = de.entry.kind;
 			if(kind != FavoriteKind.Node && kind != FavoriteKind.Type && kind != FavoriteKind.Member)
 				return;
-			if(de.isVirtualChild && kind != FavoriteKind.Type)
+			// Virtual rows: types and deep-search members (with a valid target)
+			// can spawn nodes; other virtual rows are read-only.
+			if(de.isVirtualChild && !(kind == FavoriteKind.Type || (kind == FavoriteKind.Member && de.entry.targetMember != null)))
 				return;
 			var graphEditor = uNodeEditor.window?.graphEditor;
 			if(graphEditor == null || graphEditor.graphData == null || !graphEditor.graphData.CanAddNode) {
