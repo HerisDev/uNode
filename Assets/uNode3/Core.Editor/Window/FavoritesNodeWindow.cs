@@ -220,10 +220,17 @@ namespace MaxyGames.UNode.Editors {
 			if(!string.IsNullOrEmpty(searchString))
 				return BuildFlatSearchRows(allEntries);
 
-			// Group children by parentID.
+			// Group children by parentID; groups containing only members
+			// (the children of a type item) are always sorted by name.
 			var childrenOf = allEntries
 				.GroupBy(e => e.parentID ?? string.Empty)
-				.ToDictionary(g => g.Key, g => g.OrderBy(x => x.orderIndex).ToList());
+				.ToDictionary(g => g.Key, g => {
+					var list = g.OrderBy(x => x.orderIndex).ToList();
+					if(list.Count > 0 && list.All(x => x.kind == FavoriteKind.Member)) {
+						list.Sort((a, b) => string.Compare(a.memberName, b.memberName, StringComparison.OrdinalIgnoreCase));
+					}
+					return list;
+				});
 
 			// Recursively build tree items + the flat visible-row list.
 			List<TreeViewItemData<DisplayEntry>> BuildChildren(string parentID, int depth, bool inNamespace) {
@@ -371,11 +378,14 @@ namespace MaxyGames.UNode.Editors {
 				var s = ItemSelector.GetRelevanceScore(query, str);
 				if(s > best) best = s;
 			}
-			Consider(GetDisplayName(e));
-			if(e.kind == FavoriteKind.Member)
+			if(e.kind == FavoriteKind.Member) {
+				// Plain name keeps scoring clean of rich-text label markup.
 				Consider(e.memberName);
-			else if(e.typeName != null)
-				Consider(e.typeName.Split('.').Last());
+			} else {
+				Consider(GetDisplayName(e));
+				if(e.typeName != null)
+					Consider(e.typeName.Split('.').Last());
+			}
 			return best;
 		}
 
@@ -482,7 +492,7 @@ namespace MaxyGames.UNode.Editors {
 				case FavoriteKind.Member:
 					if(isVirtualMember(e))
 						return typeForDisplay?.PrettyName() ?? "(Type)";
-					return e.memberName ?? "(missing)";
+					return GetMemberLabel(e) ?? "(missing)";
 				case FavoriteKind.Node:
 					if(!string.IsNullOrEmpty(e.nodeMenuName)) return e.nodeMenuName.Split('.').Last();
 					return typeForDisplay?.PrettyName() ?? "(Node)";
@@ -495,6 +505,22 @@ namespace MaxyGames.UNode.Editors {
 
 		bool isVirtualMember(FavoritesDataAsset.Entry e) {
 			return e.isVirtual && e.kind == FavoriteKind.Type;
+		}
+
+		/// <summary>
+		/// Formats a member label like ItemSelector does: pretty method/constructor
+		/// signature, extension-method formatting, and rich colored text when the
+		/// coloredItem preference is enabled.
+		/// </summary>
+		string GetMemberLabel(FavoritesDataAsset.Entry e) {
+			var member = FavoritesManager.GetEntryMember(e);
+			if(member == null)
+				return e.memberName;
+			if(member is MethodInfo method && method.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false))
+				return EditorReflectionUtility.GetPrettyExtensionMethodName(method);
+			if(uNodePreference.preferenceData.coloredItem)
+				return NodeBrowser.GetRichMemberName(member);
+			return NodeBrowser.GetPrettyMemberName(member);
 		}
 
 		Texture GetIcon(FavoritesDataAsset.Entry e) {
@@ -962,17 +988,26 @@ namespace MaxyGames.UNode.Editors {
 				var last = members[members.Length - 1];
 				var declType = last.DeclaringType ?? memberData.startType;
 				if(declType == null) return;
-				// Ensure type header exists.
-				if(!FavoritesManager.asset.entries.Any(x => x.categoryID == currentCategoryID && x.kind == FavoriteKind.Type && x.typeName == declType.FullName && (parentID == null || x.parentID == parentID))) {
-					FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry { kind = FavoriteKind.Type, targetType = new SerializedType(declType), parentID = parentID });
+				// Resolve or create the type header at the chosen parent, then bind
+				// the member INSIDE it so removing the type removes its members.
+				string pid = parentID ?? string.Empty;
+				var typeHeader = FavoritesManager.asset.entries.FirstOrDefault(x =>
+					x.categoryID == currentCategoryID && x.kind == FavoriteKind.Type &&
+					x.typeName == declType.FullName && x.parentID == pid);
+				if(typeHeader == null) {
+					FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry { kind = FavoriteKind.Type, targetType = new SerializedType(declType), parentID = pid });
+					typeHeader = FavoritesManager.asset.entries.FirstOrDefault(x =>
+						x.categoryID == currentCategoryID && x.kind == FavoriteKind.Type &&
+						x.typeName == declType.FullName && x.parentID == pid);
 				}
-				string typeID = FavoritesManager.asset.entries.FirstOrDefault(x => x.categoryID == currentCategoryID && x.kind == FavoriteKind.Type && x.typeName == declType.FullName && (parentID == null || x.parentID == parentID))?.id;
-				if(FavoritesManager.asset.entries.Any(x => x.kind == FavoriteKind.Member && x.typeName == declType.FullName && x.memberName == last.Name)) return;
-				FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry {
-					kind = FavoriteKind.Member,
-					targetMember = MemberData.CreateFromMember(last),
-					parentID = typeID ?? parentID
-				});
+				if(typeHeader == null) return;
+				if(!FavoritesManager.asset.entries.Any(x => x.kind == FavoriteKind.Member && x.parentID == typeHeader.id && FavoritesManager.GetEntryMember(x) == last)) {
+					FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry {
+						kind = FavoriteKind.Member,
+						targetMember = MemberData.CreateFromMember(last),
+						parentID = typeHeader.id,
+					});
+				}
 			}
 			ReloadTreeView();
 		}
@@ -1015,7 +1050,7 @@ namespace MaxyGames.UNode.Editors {
 				EditorGUILayout.EndHorizontal();
 				EditorGUILayout.Space(4);
 				foreach(var m in validMembers) {
-					bool current = FavoritesManager.asset.entries.Any(x => x.kind == FavoriteKind.Member && x.typeName == e.typeName && x.memberName == m.Name);
+					bool current = FindChildMemberEntry(e.id, m) != null;
 					bool updated = EditorGUILayout.ToggleLeft(m.Name + "  :  " + m.MemberType, current);
 					if(updated != current) SetMemberFavorite(e, m, updated);
 				}
@@ -1023,18 +1058,26 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		void SetMemberFavorite(FavoritesDataAsset.Entry typeEntry, MemberInfo member, bool value) {
+			// Members live INSIDE their type entry (parentID = type id) and are
+			// identified by their reflected MemberInfo, so removing the type
+			// cascades and duplicates are impossible.
 			if(value) {
-				if(!FavoritesManager.asset.entries.Any(x => x.kind == FavoriteKind.Member && x.typeName == typeEntry.typeName && x.memberName == member.Name)) {
-					FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry {
-						kind = FavoriteKind.Member,
-						targetMember = MemberData.CreateFromMember(member),
-						parentID = typeEntry.parentID
-					});
-				}
+				FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry {
+					kind = FavoriteKind.Member,
+					targetMember = MemberData.CreateFromMember(member),
+					parentID = typeEntry.id,
+				});
 			} else {
-				var toRemove = FavoritesManager.asset.entries.FirstOrDefault(x => x.kind == FavoriteKind.Member && x.typeName == typeEntry.typeName && x.memberName == member.Name);
+				var toRemove = FindChildMemberEntry(typeEntry.id, member);
 				if(toRemove != null) FavoritesManager.RemoveEntry(toRemove.id);
 			}
+		}
+
+		FavoritesDataAsset.Entry FindChildMemberEntry(string parentID, MemberInfo member) {
+			return FavoritesManager.asset.entries.FirstOrDefault(x =>
+				x.kind == FavoriteKind.Member &&
+				x.parentID == parentID &&
+				FavoritesManager.GetEntryMember(x) == member);
 		}
 
 		void ShowAutoSortMenu() {

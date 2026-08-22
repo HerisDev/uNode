@@ -239,15 +239,70 @@ namespace MaxyGames.UNode.Editors {
 		#endregion
 
 		#region Entries
-		public static void AddEntry(string categoryID, FavoritesDataAsset.Entry entry) {
+		/// <summary>
+		/// Add an entry to the asset. Returns false and changes nothing when
+		/// the entry is a duplicate member inside its type item.
+		/// </summary>
+		public static bool AddEntry(string categoryID, FavoritesDataAsset.Entry entry) {
 			if(entry.parentID == null)
 				entry.parentID = string.Empty;
+			// Disallow duplicated members inside the same type item.
+			if(entry.kind == FavoriteKind.Member) {
+				var memberInfo = GetEntryMember(entry);
+				bool duplicate = memberInfo != null
+					? HasMember(categoryID, entry.parentID, memberInfo)
+					: HasMemberByName(categoryID, entry.parentID, entry.memberName); // fallback when reflection fails
+				if(duplicate)
+					return false;
+			}
 			entry.categoryID = categoryID;
 			entry.id = Guid.NewGuid().ToString();
 			entry.orderIndex = NextOrderIndex(categoryID, entry.parentID);
 			asset.entries.Add(entry);
 			Save();
 			RaiseChanged();
+			return true;
+		}
+
+		/// <summary>
+		/// Resolve the reflected MemberInfo targeted by a member entry
+		/// (the last element of its MemberData chain).
+		/// </summary>
+		public static MemberInfo GetEntryMember(FavoritesDataAsset.Entry entry) {
+			if(entry == null || entry.kind != FavoriteKind.Member || entry.targetMember == null)
+				return null;
+			try {
+				var members = entry.targetMember.GetMembers(false);
+				if(members != null && members.Length > 0)
+					return members[members.Length - 1];
+			}
+			catch { }
+			return null;
+		}
+
+		/// <summary>
+		/// True when an equivalent member already exists under the same parent.
+		/// Compares MemberInfo directly (reflection caches instances per member).
+		/// </summary>
+		public static bool HasMember(string categoryID, string parentID, MemberInfo member) {
+			if(member == null)
+				return false;
+			return asset.entries.Any(e =>
+				e.categoryID == categoryID &&
+				e.kind == FavoriteKind.Member &&
+				e.parentID == parentID &&
+				GetEntryMember(e) == member);
+		}
+
+		/// <summary>Name-only fallback used when reflection resolution fails.</summary>
+		public static bool HasMemberByName(string categoryID, string parentID, string memberName) {
+			if(string.IsNullOrEmpty(memberName))
+				return false;
+			return asset.entries.Any(e =>
+				e.categoryID == categoryID &&
+				e.kind == FavoriteKind.Member &&
+				e.parentID == parentID &&
+				e.memberName == memberName);
 		}
 
 		public static void RemoveEntry(string entryID) {
