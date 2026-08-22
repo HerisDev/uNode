@@ -482,11 +482,18 @@ namespace MaxyGames.UNode.Editors {
 					// Manual selection handling (GraphPanel pattern).
 					var captured = de; // capture for closure
 					item.onClick = (_) => {
-						selectedEntry = captured.isVirtualChild ? null : captured;
+						selectedEntry = captured;
 						UpdateDetailPanel();
 						UpdateAddMembersButton();
 						entryTreeView.RefreshItems();
 					};
+
+					// Selection highlight
+					bool isSelected = selectedEntry != null && selectedEntry.entry != null
+						&& captured.entry != null
+						&& captured.entry.id == selectedEntry.entry.id
+						&& captured.isVirtualChild == selectedEntry.isVirtualChild;
+					item.style.backgroundColor = isSelected ? new Color(0.24f, 0.49f, 0.91f, 0.35f) : Color.clear;
 
 					// Update visual content.
 					var icon = item.Q<Image>("icon");
