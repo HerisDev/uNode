@@ -277,6 +277,20 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
+		/// Rename a folder entry. Returns false if the entry is missing or not a folder.
+		/// </summary>
+		public static bool RenameFolder(string entryID, string newName) {
+			if(string.IsNullOrWhiteSpace(newName)) return false;
+			var entry = asset.entries.FirstOrDefault(e => e.id == entryID);
+			if(entry == null || entry.kind != FavoriteKind.Folder)
+				return false;
+			entry.displayName = newName.Trim();
+			Save();
+			RaiseChanged();
+			return true;
+		}
+
+		/// <summary>
 		/// Move an entry to a new parent at a specific sibling index.
 		/// Rejects cycle-creating moves (entry into its own descendant).
 		/// </summary>
