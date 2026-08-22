@@ -126,6 +126,25 @@ namespace MaxyGames.UNode.Editors {
 			);
 		}
 
+		private void RemoveSelectedCategory() {
+			var cats = FavoritesManager.GetCategories();
+			if(cats.Count <= 1) {
+				EditorUtility.DisplayDialog("Cannot Remove", "At least one category must remain.", "OK");
+				return;
+			}
+			if(!EditorUtility.DisplayDialog("Remove Category", $"Remove category '{cats.FirstOrDefault(c => c.id == currentCategoryID)?.name}' and all its items?", "Yes", "Cancel"))
+				return;
+			string removedID = currentCategoryID;
+			FavoritesManager.RemoveCategory(removedID);
+			// Switch to the first remaining category.
+			var remaining = FavoritesManager.GetCategories();
+			if(remaining.Count > 0) {
+				currentCategoryID = remaining[0].id;
+			}
+			UpdateCategoryDropdown();
+			ReloadTreeView();
+		}
+
 		// ═══════════════════════════════════════
 		//  Tree Data
 		// ═══════════════════════════════════════
@@ -440,12 +459,24 @@ namespace MaxyGames.UNode.Editors {
 			// ── Toolbar ──
 			toolbar = new Toolbar();
 
-			categoryDropdown = new DropdownField("Category", new List<string>(), 0) { style = { width = 180 } };
+			categoryDropdown = new DropdownField("Category", new List<string>(), 0) { style = { width = 160 } };
 			categoryDropdown.RegisterValueChangedCallback(OnCategoryChanged);
 			toolbar.Add(categoryDropdown);
 
+			// Category add/remove
+			var addCategoryBtn = new ToolbarButton(() => CreateNewCategory()) { text = "+", tooltip = "New Category" };
+			addCategoryBtn.style.width = 24;
+			addCategoryBtn.style.marginLeft = 2;
+			toolbar.Add(addCategoryBtn);
+
+			var removeCategoryBtn = new ToolbarButton(() => RemoveSelectedCategory()) { text = "-", tooltip = "Remove Category" };
+			removeCategoryBtn.style.width = 24;
+			toolbar.Add(removeCategoryBtn);
+
+			toolbar.Add(new ToolbarSpacer());
+
 			// Combined add button with dropdown menu
-			var addMenu = new ToolbarButton(ShowAddMenu) { text = "+", tooltip = "Add Item" };
+			var addMenu = new ToolbarButton(ShowAddMenu) { text = "+ Add", tooltip = "Add Item" };
 			toolbar.Add(addMenu);
 
 			removeButton = new ToolbarButton(() => RemoveSelected()) { text = "Remove", tooltip = "Remove selected" };
@@ -474,19 +505,24 @@ namespace MaxyGames.UNode.Editors {
 			// Modeled after GraphPanel.DrawElements: makeItem returns a PanelElement-like
 			// "content" row; the TreeView wraps it with itemUssClassName + itemContentContainerUssClassName.
 			entryTreeView = new TreeView(
-				makeItem: () => new FavoritesTreeItem(),
+				makeItem: () => new PanelElement<FavoritesDataAsset.Entry>(),
 				bindItem: (ve, index) => {
-					if(!(ve is FavoritesTreeItem item))
+					if(!(ve is PanelElement<FavoritesDataAsset.Entry> item))
 						return;
 					item.index = index;
 					var de = entryTreeView.GetItemDataForIndex<DisplayEntry>(index);
 					if(de == null) return;
-					item.entry = de.entry;
-					item.isVirtualChild = de.isVirtualChild;
+					item.value = de.entry;
+
+					// Drag behavior: virtual rows are read-only (non-draggable, no drop inside).
+					bool isVirtual = de.isVirtualChild || de.entry.isVirtual;
+					item.CanDragFunc = () => !isVirtual;
+					item.CanDragInsideParentFunc = () => !isVirtual;
+					item.CanHaveChildsFunc = () => de.entry.kind == FavoriteKind.Folder && !de.entry.isVirtual;
 
 					// Set drag payload (null for virtual rows = read-only).
 					item.GetDragGenericData = () => {
-						if(de.isVirtualChild || de.entry.isVirtual)
+						if(isVirtual)
 							return null;
 						return new Dictionary<string, object> {
 							{ "favoriteID", de.entry.id },
@@ -510,17 +546,12 @@ namespace MaxyGames.UNode.Editors {
 						&& captured.isVirtualChild == selectedEntry.isVirtualChild;
 					item.style.backgroundColor = isSelected ? new Color(0.24f, 0.49f, 0.91f, 0.35f) : Color.clear;
 
-					// Update visual content.
-					var icon = item.Q<Image>("icon");
-					if(icon != null) icon.image = GetIcon(de.entry);
-					var label = item.Q<Label>("label");
-					if(label != null) {
-						label.text = de.isVirtualChild || de.entry.kind == FavoriteKind.Member
-							? "    " + GetDisplayName(de.entry)
-							: GetDisplayName(de.entry);
-					}
-					var kindLabel = item.Q<Label>("kind");
-					if(kindLabel != null) kindLabel.text = de.entry.kind.ToString();
+					// Update visual content using ClickableElement's built-in label/icon
+					// (matching GraphPanel's SetupPanelElement pattern).
+					item.label.text = de.isVirtualChild || de.entry.kind == FavoriteKind.Member
+						? "    " + GetDisplayName(de.entry)
+						: GetDisplayName(de.entry);
+					item.ShowIcon(GetIcon(de.entry));
 				}
 			);
 			// Handle selection manually (like GraphPanel) so clicks don't conflict
@@ -533,10 +564,15 @@ namespace MaxyGames.UNode.Editors {
 			entryTreeView.virtualizationMethod = CollectionVirtualizationMethod.FixedHeight;
 			entryTreeView.fixedItemHeight = 20;
 
-			// Drag-and-drop: standard TreeViewDragger + custom controller that
-			// resolves drops against our data and rebuilds the tree.
+			// Drag-and-drop: standard TreeViewDragger + custom controller
+			// (same pattern as GraphPanel's TreeViewUGraphElementDragAndDropController).
 			var dragger = new TreeViewDragger(entryTreeView);
-			dragger.dragAndDropController = new FavoritesDragController(entryTreeView, (movedID, insertIndex) => {
+			dragger.dragAndDropController = new TreeViewCustomDragAndDropController(entryTreeView, (id, parentId, childIndex) => {
+				// id/parentId/childIndex are the TreeView's internal integer ids —
+				// we ignore them and resolve the drop from the drag payload + insert index.
+			});
+			// We use a wrapper that reads the actual drop position from the drag args.
+			dragger.dragAndDropController = new FavoritesReorderController(entryTreeView, (movedID, insertIndex) => {
 				if(string.IsNullOrEmpty(movedID)) return;
 				if(!ResolveSlot(insertIndex, out var parentID, out var siblingIndex, out _)) return;
 				parentID = parentID ?? "";
