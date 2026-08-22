@@ -8,7 +8,7 @@ using UnityEditor;
 using Object = UnityEngine.Object;
 
 namespace MaxyGames.UNode.Editors.UI {
-    internal interface ITreeViewItemElement {
+    public interface ITreeViewItemElement {
         int index { get; set; }
         VisualElement element => this as VisualElement;
 

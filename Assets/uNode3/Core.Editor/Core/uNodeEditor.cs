@@ -575,7 +575,6 @@ namespace MaxyGames.UNode.Editors {
 			[System.Runtime.Serialization.OnDeserialized]
 			private void OnDeserialized() {
 				if(favoriteNodeEntries == null) favoriteNodeEntries = new();
-				if(favoritesData == null) favoritesData = new();
 			}
 
 			#region Favorite Node Entries
@@ -632,119 +631,6 @@ namespace MaxyGames.UNode.Editors {
 						orderIndex = index++,
 					});
 				}
-			}
-			#endregion
-
-			#region Favorites Data (Window)
-			public enum FavoriteItemKind {
-				Node = 0,
-				Type = 1,
-				Member = 2,
-			}
-
-			[Serializable]
-			public class FavoriteEntry {
-				public string id;
-				public string typeFullName;
-				public FavoriteItemKind kind;
-				public string displayName;
-				public string categoryID;
-				public int orderIndex;
-				public List<string> excludedMembers = new List<string>();
-			}
-
-			[Serializable]
-			public class FavoriteCategory {
-				public string id;
-				public string name;
-				public int orderIndex;
-			}
-
-			[Serializable]
-			public class FavoritesData {
-				public List<FavoriteCategory> categories = new List<FavoriteCategory>();
-				public List<FavoriteEntry> entries = new List<FavoriteEntry>();
-			}
-
-			public FavoritesData favoritesData = new FavoritesData();
-
-			public event Action OnFavoritesChanged;
-
-			/// <summary>
-			/// Raise the favorites changed event (for external mutations of the data).
-			/// </summary>
-			public void RaiseFavoritesChanged() {
-				OnFavoritesChanged?.Invoke();
-			}
-
-			public FavoriteCategory GetOrCreateCategory(string name) {
-				var cat = favoritesData.categories.FirstOrDefault(c => c.name == name);
-				if(cat == null) {
-					cat = new FavoriteCategory {
-						id = Guid.NewGuid().ToString(),
-						name = name,
-						orderIndex = favoritesData.categories.Count,
-					};
-					favoritesData.categories.Add(cat);
-					OnFavoritesChanged?.Invoke();
-				}
-				return cat;
-			}
-
-			public void RemoveCategory(string categoryID) {
-				favoritesData.categories.RemoveAll(c => c.id == categoryID);
-				favoritesData.entries.RemoveAll(e => e.categoryID == categoryID);
-				OnFavoritesChanged?.Invoke();
-				SaveOptions();
-			}
-
-			public void RenameCategory(string categoryID, string newName) {
-				var cat = favoritesData.categories.FirstOrDefault(c => c.id == categoryID);
-				if(cat != null) {
-					cat.name = newName;
-					OnFavoritesChanged?.Invoke();
-					SaveOptions();
-				}
-			}
-
-			public void AddFavoriteEntry(string categoryID, FavoriteEntry entry) {
-				entry.categoryID = categoryID;
-				entry.id = Guid.NewGuid().ToString();
-				entry.orderIndex = favoritesData.entries.Count;
-				favoritesData.entries.Add(entry);
-				OnFavoritesChanged?.Invoke();
-				SaveOptions();
-			}
-
-			public void RemoveFavoriteEntry(string entryID) {
-				favoritesData.entries.RemoveAll(e => e.id == entryID);
-				OnFavoritesChanged?.Invoke();
-				SaveOptions();
-			}
-
-			public void ReorderEntries(string categoryID, int fromIndex, int toIndex) {
-				var catEntries = favoritesData.entries.Where(e => e.categoryID == categoryID).OrderBy(e => e.orderIndex).ToList();
-				if(fromIndex < 0 || fromIndex >= catEntries.Count || toIndex < 0 || toIndex >= catEntries.Count)
-					return;
-				var moved = catEntries[fromIndex];
-				catEntries.RemoveAt(fromIndex);
-				catEntries.Insert(toIndex, moved);
-				for(int i = 0; i < catEntries.Count; i++) {
-					catEntries[i].orderIndex = i;
-				}
-				OnFavoritesChanged?.Invoke();
-				SaveOptions();
-			}
-
-			public List<FavoriteEntry> GetEntriesForCategory(string categoryID) {
-				return favoritesData.entries.Where(e => e.categoryID == categoryID).OrderBy(e => e.orderIndex).ToList();
-			}
-
-			public FavoriteCategory GetDefaultCategory() {
-				if(favoritesData.categories.Count == 0) {
-					return GetOrCreateCategory("General");
-				}
-				return favoritesData.categories.OrderBy(c => c.orderIndex).First();
 			}
 			#endregion
 
