@@ -459,6 +459,8 @@ namespace MaxyGames.UNode.Editors {
 		bool CanMove(string movedID, string parentID) {
 			var moved = FavoritesManager.asset.entries.FirstOrDefault(e => e.id == movedID);
 			if(moved == null || moved.isVirtual) return false;
+			// Members are bound to their type header and can't be re-parented.
+			if(moved.kind == FavoriteKind.Member) return false;
 			if(string.IsNullOrEmpty(parentID)) return true;
 			var parent = FavoritesManager.asset.entries.FirstOrDefault(e => e.id == parentID);
 			if(parent == null) return false;
@@ -628,12 +630,15 @@ namespace MaxyGames.UNode.Editors {
 					item.value = de.entry;
 					item.userData = de;
 
-					// Drag behavior: virtual rows are read-only (non-draggable, no drop inside).
+					// Drag behavior: virtual rows are read-only (no drop inside), and
+					// member rows are permanently bound to their type header.
 					// Reordering is also disabled while searching (flat relevance view).
 					bool isVirtual = de.isVirtualChild || de.entry.isVirtual;
+					bool isMember = de.entry.kind == FavoriteKind.Member;
 					bool hasSearch = !string.IsNullOrEmpty(searchString);
-					item.CanDragFunc = () => !isVirtual && !hasSearch;
-					item.CanDragInsideParentFunc = () => !isVirtual && !hasSearch;
+					bool canDrag = !isVirtual && !isMember && !hasSearch;
+					item.CanDragFunc = () => canDrag;
+					item.CanDragInsideParentFunc = () => canDrag;
 					item.CanHaveChildsFunc = () => de.entry.kind == FavoriteKind.Folder && !de.entry.isVirtual && !hasSearch;
 
 					// Set drag payload (null for virtual rows = read-only).
