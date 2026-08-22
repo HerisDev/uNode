@@ -266,16 +266,32 @@ namespace MaxyGames.UNode.Editors {
 			if(visibleRows.Count == 0)
 				return insertIndex <= 0;
 
-			// At the very top or past the end: always root, depth 0.
-			if(insertIndex <= 0 || insertIndex >= visibleRows.Count) {
+			// At the very top: root.
+			if(insertIndex <= 0) {
 				parentID = "";
-				siblingIndex = insertIndex;
-				indentDepth = insertIndex <= 0 ? 0 : visibleRows[visibleRows.Count - 1].depth;
+				siblingIndex = 0;
+				indentDepth = 0;
+				return true;
+			}
+
+			// Past the last visible row: anchor on the last row. If it's a folder,
+			// dropping below it means dropping INTO the folder (as its last child).
+			if(insertIndex >= visibleRows.Count) {
+				var last = visibleRows[visibleRows.Count - 1];
+				if(last.entry.kind == FavoriteKind.Folder) {
+					parentID = last.entry.id;
+					siblingIndex = -1; // append
+					indentDepth = last.depth + 1;
+				} else {
+					parentID = last.parentID ?? "";
+					indentDepth = last.depth;
+					siblingIndex = CountSiblingsBefore(visibleRows.Count, parentID);
+				}
 				return true;
 			}
 
 			// Anchor on the row above the insertion slot.
-			var anchor = visibleRows[Mathf.Clamp(insertIndex - 1, 0, visibleRows.Count - 1)];
+			var anchor = visibleRows[insertIndex - 1];
 
 			// Inside a fixed namespace expansion: reject.
 			if(anchor.inNamespace && anchor.entry.kind == FavoriteKind.Type)
@@ -296,7 +312,6 @@ namespace MaxyGames.UNode.Editors {
 			indentDepth = anchor.depth;
 			siblingIndex = CountSiblingsBefore(insertIndex, parentID);
 			if(nextDepth > anchor.depth) {
-				// Actually inserting between two items that share the folder as parent.
 				siblingIndex = CountDescendantsVisibleBefore(insertIndex, parentID);
 			}
 			return true;
