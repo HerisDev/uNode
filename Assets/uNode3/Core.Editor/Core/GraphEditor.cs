@@ -218,7 +218,7 @@ namespace MaxyGames.UNode.Editors {
 			return value;
 		});
 
-		public static bool CreateNodeProcessor(MemberData member, GraphEditorData editorData, Vector2 position, Action<Node> onCreated) {
+		public static bool CreateNodeProcessor(MemberData member, GraphEditorData editorData, Vector2 position, Action<Node> onCreated = null) {
 			var members = member.GetMembers(false);
 			void PostAction() {
 				if(uNodePreference.preferenceData.autoAddNamespace) {

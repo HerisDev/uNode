@@ -20,7 +20,7 @@ namespace MaxyGames.UNode {
 				references.Add(type as Object);
 				type.ScriptTypeData.scriptGraph = scriptGraph;
 			} else {
-				throw null;
+				throw new System.ArgumentException($"Type '{type?.GetType().FullName}' must be a UnityEngine.Object to add to ScriptTypeList.");
 			}
 		}
 

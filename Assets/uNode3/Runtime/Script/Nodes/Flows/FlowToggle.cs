@@ -73,8 +73,8 @@ namespace MaxyGames.UNode.Nodes {
 
 			input.isCoroutine = IsCoroutine;
 			turnOn.isCoroutine = onTurnedOn.IsCoroutine;
-			input.isCoroutine = IsCoroutine;
-			turnOn.isCoroutine = onTurnedOff.IsCoroutine;
+			turnOff.isCoroutine = onTurnedOff.IsCoroutine;
+			toggle.isCoroutine = IsCoroutine;
 
 			isOn.AssignGetCallback(instance => instance.GetOrCreateElementData<RuntimeData>(this).open);
 		}
