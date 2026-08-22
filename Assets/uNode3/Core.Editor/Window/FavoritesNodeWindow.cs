@@ -39,8 +39,6 @@ namespace MaxyGames.UNode.Editors {
 		private CancellationTokenSource _searchCts;
 		private int _searchGeneration;
 
-		/// <summary>Minimum query length before deep member search kicks in.</summary>
-		const int MinDeepQueryLength = 3;
 		static readonly BindingFlags s_DeepMemberFlags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
 
 		class DisplayEntry {
@@ -459,18 +457,23 @@ namespace MaxyGames.UNode.Editors {
 			// Snapshot phase (UI thread): capture all strings the worker needs.
 			var snapshot = BuildSearchSnapshot();
 
-			Task.Run(() => ComputeFlatSearchInBackground(snapshot, value, token, progress))
+			Task.Factory.StartNew(
+					state => ComputeFlatSearchInBackground(snapshot, value, token, progress),
+					null, token, TaskCreationOptions.LongRunning, TaskScheduler.Default)
 				.ContinueWith(t => {
-					if(t.Status == TaskStatus.Faulted) {
-						// Surface unexpected worker failures (cancellations stay silent).
-						Debug.LogException(t.Exception?.InnerException ?? t.Exception);
+					if(t.IsFaulted) {
+						// Surface unexpected worker failures; cancellations stay silent.
+						var ex = t.Exception?.InnerException ?? t.Exception;
+						if(!(ex is OperationCanceledException)) {
+							Debug.LogException(ex);
+						}
 						HideSearchProgress();
 						return;
 					}
 					if(t.Status != TaskStatus.RanToCompletion)
 						return; // canceled — a newer search superseded it
 					ApplyBackgroundResult(generation, t.Result);
-				}, TaskScheduler.FromCurrentSynchronizationContext());
+				}, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.FromCurrentSynchronizationContext());
 		}
 
 		void ShowSearchProgress() {
@@ -543,7 +546,7 @@ namespace MaxyGames.UNode.Editors {
 
 			// Deep search: "trans pos" matches Transform members named like "pos".
 			var queryParts = query.Split(new[] { '.', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-			bool deepSearch = query.Length >= MinDeepQueryLength;
+			bool deepSearch = query.Length >= ItemSelector.MinWordForDeepTypeSearch;
 
 			float Score(SearchItem item) {
 				float best = -1f;
@@ -558,17 +561,22 @@ namespace MaxyGames.UNode.Editors {
 				return best;
 			}
 
-			/// Scores a member name during deep search: multi-part queries match the
-			/// trailing parts against the member; otherwise the full query is used.
+			/// <summary>
+			/// Replicates TreeSearcher.IsMatchSearch for members: with a multi-part
+			/// query ("trans pos") every trailing part must match the member name,
+			/// accumulating ItemSelector's per-part bonus; otherwise the full query
+			/// is scored against the name directly.
+			/// </summary>
 			float ScoreMemberName(string name) {
 				if(string.IsNullOrEmpty(name)) return -1f;
 				if(queryParts.Length >= 2) {
-					float best = -1f;
+					float score = -1f;
 					for(int i = 1; i < queryParts.Length; i++) {
-						var v = ItemSelector.GetRelevanceScore(queryParts[i], name);
-						if(v > best) best = v;
+						var s = ItemSelector.GetRelevanceScore(queryParts[i], name);
+						if(s < 0f) return -1f; // all parts must match
+						score = MathF.Max(score, s) + (i * 0.1f);
 					}
-					return best;
+					return score;
 				}
 				return ItemSelector.GetRelevanceScore(query, name);
 			}
@@ -619,7 +627,7 @@ namespace MaxyGames.UNode.Editors {
 			/// persisted and resolve lazily on the UI thread when bound.
 			/// </summary>
 			void CollectTypeMembers(Type type, string typePath) {
-				if(!deepSearch || type == null)
+				if(!deepSearch || type == null || type.IsEnum)
 					return;
 				token.ThrowIfCancellationRequested();
 				MemberInfo[] members;
@@ -630,8 +638,6 @@ namespace MaxyGames.UNode.Editors {
 					token.ThrowIfCancellationRequested();
 					if(m is EventInfo) continue;
 					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
-					string key = declName + "::" + m.Name + "::" + m.MetadataToken;
-					if(!seenMemberKeys.Add(key)) continue;
 					float score = ScoreMemberName(m.Name);
 					if(score < 0f) continue;
 					var entry = new FavoritesDataAsset.Entry {
@@ -639,7 +645,9 @@ namespace MaxyGames.UNode.Editors {
 						targetMember = MemberData.CreateFromMember(m),
 						isVirtual = true,
 						displayName = m.Name,
-						id = "[deep]:" + key,
+						// AddResult dedupes via the resolved MemberInfo, so the id
+						// only needs to be unique/stable for this search session.
+						id = "[deep]:" + declName + "::" + m.Name + "::" + m.MetadataToken,
 						parentID = "[deep]",
 					};
 					AddResult(new SearchItem {
@@ -892,8 +900,7 @@ namespace MaxyGames.UNode.Editors {
 			return NodeBrowser.GetPrettyMemberName(member);
 		}
 
-		Texture GetIcon(FavoritesDataAsset.Entry e) {
-			// Resolve the type so virtual namespace-type rows get a real type icon
+		Texture GetIcon(FavoritesDataAsset.Entry e) {			// Resolve the type so virtual namespace-type rows get a real type icon
 			// (resolvedType returns null for isVirtual entries).
 			Type iconType = ResolveEntryType(e);
 
@@ -917,6 +924,24 @@ namespace MaxyGames.UNode.Editors {
 				default:
 					return iconType != null ? uNodeEditorUtility.GetTypeIcon(iconType) : uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.ExtensionIcon));
 			}
+		}
+
+		/// <summary>
+		/// Second icon for member rows: the value/return type icon
+		/// (field type, property type, or method return type).
+		/// </summary>
+		Texture GetMemberValueTypeIcon(FavoritesDataAsset.Entry e) {
+			if(e.kind != FavoriteKind.Member)
+				return null;
+			var mi = FavoritesManager.GetEntryMember(e);
+			Type t = null;
+			if(mi is MethodInfo method)
+				t = method.ReturnType;
+			else if(mi is PropertyInfo prop)
+				t = prop.PropertyType;
+			else if(mi is FieldInfo field)
+				t = field.FieldType;
+			return t != null ? uNodeEditorUtility.GetTypeIcon(t) : null;
 		}
 
 		// ═══════════════════════════════════════
@@ -1021,6 +1046,15 @@ namespace MaxyGames.UNode.Editors {
 					pathLabel.style.display = DisplayStyle.None;
 					textColumn.Add(pathLabel);
 					item.Add(textColumn);
+					// Second icon slot (member rows): shows the value/return type icon.
+					// Hidden unless bind assigns a texture to it.
+					var typeIcon = new Image { name = "type-icon" };
+					typeIcon.pickingMode = PickingMode.Ignore;
+					typeIcon.style.width = 16;
+					typeIcon.style.height = 16;
+					typeIcon.style.flexShrink = 0;
+					typeIcon.style.display = DisplayStyle.None;
+					item.Insert(1, typeIcon);
 					item.AddManipulator(new ContextualMenuManipulator(evt => BuildRowContextMenu(evt, item.userData as DisplayEntry)));
 					return item;
 				},
@@ -1082,6 +1116,15 @@ namespace MaxyGames.UNode.Editors {
 						item.icon.style.width = 16;
 						item.icon.style.height = 16;
 						item.icon.style.flexShrink = 0;
+					}
+
+					// Member rows show a second icon for the value/return type
+					// (like ItemSelector's member list: kind icon + type icon).
+					var typeIconImg = item.Q<Image>("type-icon");
+					if(typeIconImg != null) {
+						var secondTex = GetMemberValueTypeIcon(de.entry);
+						typeIconImg.image = secondTex;
+						typeIconImg.style.display = secondTex != null ? DisplayStyle.Flex : DisplayStyle.None;
 					}
 
 					// Search mode shows the breadcrumb path under the title.
