@@ -900,6 +900,49 @@ namespace MaxyGames.UNode.Editors {
 			return NodeBrowser.GetPrettyMemberName(member);
 		}
 
+		/// <summary>Plain (markup-free) row title, safe for highlight span math.</summary>
+		string GetPlainTitle(FavoritesDataAsset.Entry e) {
+			if(e.kind == FavoriteKind.Member && !isVirtualMember(e))
+				return e.memberName ?? "(missing)";
+			try { return GetDisplayName(e); }
+			catch { return e.displayName ?? e.id; }
+		}
+
+		// ItemSelector's highlight blue at 50% alpha.
+		const string kHighlightColorTag = "#3E7DD880";
+
+		/// <summary>
+		/// Wraps the query matches inside rich-text mark tags so TextCore renders a
+		/// highlight background behind them — same spans ItemSelector highlights.
+		/// The input must be markup-free so character offsets stay valid.
+		/// </summary>
+		string ApplySearchHighlight(string text) {
+			if(string.IsNullOrEmpty(text) || string.IsNullOrEmpty(searchString))
+				return text;
+			List<(int start, int end)> spans;
+			try { spans = ItemSelector.GetSearchHighlight(text, searchString); }
+			catch { return text; }
+			if(spans == null || spans.Count == 0)
+				return text;
+			var sb = new System.Text.StringBuilder(text.Length + spans.Count * 20);
+			int last = 0;
+			foreach(var span in spans) {
+				int start = Mathf.Clamp(span.start, 0, text.Length);
+				int end = Mathf.Clamp(span.end, 0, text.Length);
+				if(end <= start || start < last)
+					continue;
+				if(start > last)
+					sb.Append(text, last, start - last);
+				sb.Append("<mark=").Append(kHighlightColorTag).Append('>');
+				sb.Append(text, start, end - start);
+				sb.Append("</mark>");
+				last = end;
+			}
+			if(last < text.Length)
+				sb.Append(text, last, text.Length - last);
+			return sb.ToString();
+		}
+
 		Texture GetIcon(FavoritesDataAsset.Entry e) {			// Resolve the type so virtual namespace-type rows get a real type icon
 			// (resolvedType returns null for isVirtual entries).
 			Type iconType = ResolveEntryType(e);
@@ -1109,7 +1152,10 @@ namespace MaxyGames.UNode.Editors {
 
 					// Update visual content using ClickableElement's built-in label/icon
 					// (matching GraphPanel's SetupPanelElement pattern).
-					item.label.text = GetDisplayName(de.entry);
+					// In search mode the title is markup-free so highlight spans stay valid.
+					item.label.text = hasSearch
+						? ApplySearchHighlight(GetPlainTitle(de.entry))
+						: GetDisplayName(de.entry);
 					item.ShowIcon(GetIcon(de.entry));
 					// Fixed icon size keeps rows aligned even when a texture is missing.
 					if(item.icon != null) {
@@ -1131,7 +1177,7 @@ namespace MaxyGames.UNode.Editors {
 					var pathLabel = item.Q<Label>("path-label");
 					if(pathLabel != null) {
 						bool showPath = hasSearch && !string.IsNullOrEmpty(de.searchPath);
-						pathLabel.text = de.searchPath ?? string.Empty;
+						pathLabel.text = showPath ? ApplySearchHighlight(de.searchPath) : string.Empty;
 						pathLabel.style.display = showPath ? DisplayStyle.Flex : DisplayStyle.None;
 					}
 				}

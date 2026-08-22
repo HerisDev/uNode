@@ -33,6 +33,16 @@ namespace MaxyGames.UNode.Editors {
 		public static float GetRelevanceScore(string query, string target) {
 			return TreeSearcher.Relevance(query, target);
 		}
+
+		/// <summary>
+		/// Exposes the search highlight matching used by the item selector to other
+		/// editor windows. Returns the matched character spans (start, end) within
+		/// the haystack, computed with the same camelCase/word-boundary matcher
+		/// that drives relevance ranking.
+		/// </summary>
+		public static System.Collections.Generic.List<(int start, int end)> GetSearchHighlight(string haystack, string query) {
+			return TreeSearcher.HighlightQueryPositions(haystack, query);
+		}
 		#region Search
 		abstract class TreeSearcher {
 			public virtual float IsMatchSearch(TViewItem tree, string[] splittedStrings, SearchKind searchKind, SearchFilter searchFilter) {
