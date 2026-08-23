@@ -1093,6 +1093,17 @@ namespace MaxyGames.UNode.Editors {
 					// content — keeps hover highlight and drag hit-testing full height.
 					item.style.flexGrow = 1;
 					item.style.height = Length.Percent(100);
+
+					// Primary icon slot (member rows): shows the value/return type icon.
+					// Hidden unless bind assigns a texture to it.
+					var typeIcon = new Image { name = "type-icon" };
+					typeIcon.pickingMode = PickingMode.Ignore;
+					typeIcon.style.width = 16;
+					typeIcon.style.height = 16;
+					typeIcon.style.flexShrink = 0;
+					typeIcon.style.display = DisplayStyle.None;
+					item.Add(typeIcon);
+
 					// Two-line layout: title on top, breadcrumb path below.
 					// The path label stays hidden outside search mode.
 					var textColumn = new VisualElement { name = "text-column" };
@@ -1108,15 +1119,6 @@ namespace MaxyGames.UNode.Editors {
 					pathLabel.style.display = DisplayStyle.None;
 					textColumn.Add(pathLabel);
 					item.Add(textColumn);
-					// Second icon slot (member rows): shows the value/return type icon.
-					// Hidden unless bind assigns a texture to it.
-					var typeIcon = new Image { name = "type-icon" };
-					typeIcon.pickingMode = PickingMode.Ignore;
-					typeIcon.style.width = 16;
-					typeIcon.style.height = 16;
-					typeIcon.style.flexShrink = 0;
-					typeIcon.style.display = DisplayStyle.None;
-					item.Insert(1, typeIcon);
 					item.AddManipulator(new ContextualMenuManipulator(evt => BuildRowContextMenu(evt, item.userData as DisplayEntry)));
 					return item;
 				},
@@ -1183,8 +1185,6 @@ namespace MaxyGames.UNode.Editors {
 						item.icon.style.flexShrink = 0;
 					}
 
-					// Member rows show a second icon for the value/return type
-					// (like ItemSelector's member list: kind icon + type icon).
 					var typeIconImg = item.Q<Image>("type-icon");
 					if(typeIconImg != null) {
 						var secondTex = GetMemberValueTypeIcon(de.entry);
