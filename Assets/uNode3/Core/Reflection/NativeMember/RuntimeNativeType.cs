@@ -88,6 +88,9 @@ namespace MaxyGames.UNode {
 			if(methods != null) {
 				BuildMethods();
 			}
+			if(events != null) {
+				BuildEvents();
+			}
 			if(interfaces != null) {
 				BuildInterfaces();
 			}
@@ -198,62 +201,56 @@ namespace MaxyGames.UNode {
 		#region Partial
 		//Once a `partial` graph is generated to C#, the other half members are real members of the
 		//compiled class. uNode builds this type from graph elements alone, so they would otherwise
-		//be missing even though the assembly has them. The real MemberInfo is used, which means they
-		//read and invoke normally rather than being declaration-only.
+		//be missing even though the assembly has them.
+		//The merge itself is shared with the interpreted type through `PartialGraphMerge`, and
+		//runs regardless of whether the compiled other half exists yet, so sibling halves always
+		//combine even before any generation happened.
 		private void AppendExternalFields() {
-			if(target is not IScriptGraphType || target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
+			if(target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
 				return;
 			}
-			var native = GetNativeType();
-			if(native == null)
-				return;
-			foreach(var info in PartialGraphMembers.Get(target)) {
-				if(info.kind != PartialMemberKind.Field)
-					continue;
-				if(fields.Exists(m => m.Name == info.name))
-					continue;
-				var real = native.GetField(info.name, MemberData.flags);
-				if(real != null)
-					fields.Add(real);
-			}
+			PartialGraphMerge.AppendExternalFields(target, this, fields);
 		}
 
 		private void AppendExternalProperties() {
-			if(target is not IScriptGraphType || target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
+			if(target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
 				return;
 			}
-			var native = GetNativeType();
-			if(native == null)
-				return;
-			foreach(var info in PartialGraphMembers.Get(target)) {
-				if(info.kind != PartialMemberKind.Property)
-					continue;
-				if(properties.Exists(m => m.Name == info.name))
-					continue;
-				var real = native.GetProperty(info.name, MemberData.flags);
-				if(real != null)
-					properties.Add(real);
-			}
+			PartialGraphMerge.AppendExternalProperties(target, this, properties);
 		}
 
 		private void AppendExternalMethods() {
+			if(target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
+				return;
+			}
+			PartialGraphMerge.AppendExternalMethods(target, this, methods);
+		}
+
+		List<EventInfo> events;
+		private void AppendExternalEvents() {
 			if(target is not IScriptGraphType || target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
 				return;
 			}
 			var native = GetNativeType();
 			if(native == null)
 				return;
-			foreach(var info in PartialGraphMembers.Get(target)) {
-				if(info.kind != PartialMemberKind.Method)
+			foreach(var real in native.GetEvents(MemberData.flags)) {
+				if(events.Exists(m => m.Name == real.Name))
 					continue;
-				var parameterTypes = info.ParameterTypes();
-				var real = native.GetMethod(info.name, MemberData.flags, null, parameterTypes, null);
-				if(real == null)
-					continue;
-				if(methods.Exists(m => m.Name == info.name && m.GetParameters().Length == parameterTypes.Length))
-					continue;
-				methods.Add(real);
+				events.Add(new RuntimeGraphExternalEvent(this, real));
 			}
+		}
+
+		private void BuildEvents() {
+			var inheritMembers = BaseType != null ? BaseType.GetEvents(MemberData.flags) : Array.Empty<EventInfo>();
+			if(events == null) {
+				events = new List<EventInfo>(inheritMembers);
+			}
+			else {
+				events.Clear();
+				events.AddRange(inheritMembers);
+			}
+			AppendExternalEvents();
 		}
 		#endregion
 
@@ -344,11 +341,15 @@ namespace MaxyGames.UNode {
 			if(this.methods == null) {
 				BuildMethods();
 			}
+			if(this.events == null) {
+				BuildEvents();
+			}
 			var constructors = ReflectionUtils.GetConstructorCandidates(this.constructors, bindingAttr, this);
 			var fields = ReflectionUtils.GetFieldCandidates(this.fields, bindingAttr, this);
 			var properties = ReflectionUtils.GetPropertyCandidates(this.properties, bindingAttr, this);
 			var methods = ReflectionUtils.GetMethodCandidates(this.methods, bindingAttr, this);
-			var members = new MemberInfo[constructors.Count + fields.Count + properties.Count + methods.Count];
+			var events = ReflectionUtils.GetEventCandidates(this.events, bindingAttr, this);
+			var members = new MemberInfo[constructors.Count + fields.Count + properties.Count + methods.Count + events.Count];
 			for(int i = 0; i < constructors.Count; i++) {
 				members[i] = constructors[i];
 			}
@@ -363,6 +364,10 @@ namespace MaxyGames.UNode {
 			idx += properties.Count;
 			for(int i = 0; i < methods.Count; i++) {
 				members[i + idx] = methods[i];
+			}
+			idx += methods.Count;
+			for(int i = 0; i < events.Count; i++) {
+				members[i + idx] = events[i];
 			}
 			return members;
 		}
@@ -405,6 +410,25 @@ namespace MaxyGames.UNode {
 				BuildProperties();
 			}
 			return ReflectionUtils.GetPropertyCandidates(properties, bindingAttr, this).ToArray();
+		}
+
+		public override EventInfo GetEvent(string name, BindingFlags bindingAttr) {
+			if(events == null) {
+				BuildEvents();
+			}
+			var candidates = ReflectionUtils.GetEventCandidates(events, bindingAttr, this);
+			foreach(var evt in candidates) {
+				if(evt.Name == name)
+					return evt;
+			}
+			return BaseType?.GetEvent(name, bindingAttr);
+		}
+
+		public override EventInfo[] GetEvents(BindingFlags bindingAttr) {
+			if(events == null) {
+				BuildEvents();
+			}
+			return ReflectionUtils.GetEventCandidates(events, bindingAttr, this).ToArray();
 		}
 
 		public override Type GetInterface(string fullname, bool ignoreCase) {

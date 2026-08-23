@@ -76,6 +76,9 @@ namespace MaxyGames.UNode {
 			if(methods != null) {
 				BuildMethods();
 			}
+			if(events != null) {
+				BuildEvents();
+			}
 		}
 
 		ConstructorInfo[] constructors;
@@ -206,67 +209,109 @@ namespace MaxyGames.UNode {
 
 		#region Partial
 		/// <summary>
-		/// The members declared in the hand-written half of this graph, when it is `partial`.
-		/// Empty for every non-partial graph, and in builds.
+		/// True when this graph is marked `partial`, meaning it may combine with other halves.
 		/// </summary>
-		public IList<PartialMemberInfo> GetExternalMembers() {
-			return PartialGraphMembers.Get(target);
+		public bool IsPartialGraph {
+			get {
+				return target is IClassModifier modifier && modifier.GetModifier()?.Partial == true;
+			}
 		}
 
+		/// <summary>
+		/// The compiled CLR type of the hand-written half of this graph, or null when the
+		/// graph has none. A partial graph is fully usable without an other half; when one
+		/// exists, its members are merged into this type below.
+		/// </summary>
+		public Type OtherHalfType => PartialGraphMembers.GetOtherHalfType(target);
+
 		private void AppendExternalFields() {
-			if(target is not IScriptGraphType || target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
-				return;
-			}
-			foreach(var info in GetExternalMembers()) {
-				if(info.kind != PartialMemberKind.Field)
-					continue;
-				//A member authored in the graph always wins, so we never shadow it.
-				if(fields.Exists(m => m.Name == info.name))
-					continue;
-				fields.Add(new RuntimeGraphExternalField(this, info));
-			}
+			PartialGraphMerge.AppendExternalFields(target, this, fields);
 		}
 
 		private void AppendExternalProperties() {
-			if(target is not IScriptGraphType || target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
-				return;
-			}
-			foreach(var info in GetExternalMembers()) {
-				if(info.kind != PartialMemberKind.Property)
-					continue;
-				if(properties.Exists(m => m.Name == info.name))
-					continue;
-				properties.Add(new RuntimeGraphExternalProperty(this, info));
-			}
+			PartialGraphMerge.AppendExternalProperties(target, this, properties);
 		}
 
 		private void AppendExternalMethods() {
-			if(target is not IScriptGraphType || target is not IClassModifier mod || mod.GetModifier()?.Partial == false) {
-				return;
+			PartialGraphMerge.AppendExternalMethods(target, this, methods);
+		}
+
+		List<EventInfo> events;
+		private void BuildEvents() {
+			if(events == null) {
+				events = new List<EventInfo>();
 			}
-			foreach(var info in GetExternalMembers()) {
-				if(info.kind != PartialMemberKind.Method)
-					continue;
-				var parameterTypes = info.ParameterTypes();
-				//Methods are matched on the full signature so overloads are kept.
-				if(methods.Exists(m => m.Name == info.name && SameParameters(m, parameterTypes)))
-					continue;
-				methods.Add(new RuntimeGraphExternalMethod(this, info));
+			else {
+				events.Clear();
+			}
+			var otherHalf = OtherHalfType;
+			if(otherHalf != null) {
+				foreach(var nativeEvent in otherHalf.GetEvents(MemberData.flags)) {
+					events.Add(new RuntimeGraphExternalEvent(this, nativeEvent));
+				}
 			}
 		}
 
-		private static bool SameParameters(MethodInfo method, Type[] parameterTypes) {
-			var parameters = method.GetParameters();
-			if(parameters.Length != parameterTypes.Length)
-				return false;
-			for(int i = 0; i < parameters.Length; i++) {
-				var type = parameters[i].ParameterType;
-				if(type.IsByRef)
-					type = type.GetElementType();
-				if(type != parameterTypes[i])
-					return false;
+		public override EventInfo GetEvent(string name, BindingFlags bindingAttr) {
+			if(events == null)
+				BuildEvents();
+			foreach(var evt in events) {
+				if(evt.Name == name && IsEventValid(evt, bindingAttr))
+					return evt;
 			}
-			return true;
+			return BaseType?.GetEvent(name, bindingAttr);
+		}
+
+		public override EventInfo[] GetEvents(BindingFlags bindingAttr) {
+			if(events == null)
+				BuildEvents();
+			var result = new List<EventInfo>();
+			if(BaseType != null) {
+				result.AddRange(BaseType.GetEvents(bindingAttr));
+			}
+			foreach(var evt in events) {
+				if(IsEventValid(evt, bindingAttr))
+					result.Add(evt);
+			}
+			return result.ToArray();
+		}
+
+		private static bool IsEventValid(EventInfo evt, BindingFlags bindingAttr) {
+			var flg = bindingAttr & (BindingFlags.Static | BindingFlags.Instance);
+			if(flg == 0)
+				return true;
+			var accessor = evt.GetAddMethod(true) ?? evt.GetRemoveMethod(true);
+			bool isStatic = accessor != null && accessor.IsStatic;
+			if(isStatic)
+				return (flg & BindingFlags.Static) != 0;
+			return (flg & BindingFlags.Instance) != 0;
+		}
+
+		public override MemberInfo[] GetMembers(BindingFlags bindingAttr) {
+			var constructors = GetConstructors(bindingAttr);
+			var fields = GetFields(bindingAttr);
+			var properties = GetProperties(bindingAttr);
+			var methods = GetMethods(bindingAttr);
+			var events = GetEvents(bindingAttr);
+			var members = new MemberInfo[constructors.Length + fields.Length +
+				properties.Length + methods.Length + events.Length];
+			int idx = 0;
+			for(int i = 0; i < constructors.Length; i++) {
+				members[idx++] = constructors[i];
+			}
+			for(int i = 0; i < fields.Length; i++) {
+				members[idx++] = fields[i];
+			}
+			for(int i = 0; i < properties.Length; i++) {
+				members[idx++] = properties[i];
+			}
+			for(int i = 0; i < methods.Length; i++) {
+				members[idx++] = methods[i];
+			}
+			for(int i = 0; i < events.Length; i++) {
+				members[idx++] = events[i];
+			}
+			return members;
 		}
 		#endregion
 
@@ -442,7 +487,7 @@ namespace MaxyGames.UNode {
 			return new GraphRef(target);
 		}
 
-		public Type GetNativeType() {
+		public virtual Type GetNativeType() {
 			if(target is IClassDefinition definition) {
 				return definition.GetModel().ProxyScriptType;
 			}

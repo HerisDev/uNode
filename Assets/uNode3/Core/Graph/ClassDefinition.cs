@@ -140,7 +140,7 @@ namespace MaxyGames.UNode {
 				if(_runtimeType == null) {
 					_runtimeType = new RuntimeGraphType(this);
 				}
-				return _runtimeType;
+				return PartialGraphMembers.GetReflectionType(this, _runtimeType);
 			}
 		}
 

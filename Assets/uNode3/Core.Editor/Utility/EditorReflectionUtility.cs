@@ -50,35 +50,184 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		private static RuntimeType[] _runtimeTypes;
+		private static RuntimeType[] m_allRuntimeTypes;
+		private static HashSet<string> m_partialClaimedNames;
+		//True while BuildRuntimeTypes runs, so reflection type getters triggered by the build
+		//fall back to their raw instance instead of asking for the partial type again.
+		private static bool m_buildingRuntimeTypes;
+
+		private class RuntimeTypeEntry {
+			public RuntimeType type;
+			public UnityEngine.Object owner;
+		}
+
 		/// <summary>
 		/// Rebuild runtime types.
+		/// The result is canonical: when several partial graphs (or a graph and its other half)
+		/// share one full name, only the first reflection type is listed, so every picker shows
+		/// a single entry for the class. The complete list is kept aside for merging siblings.
 		/// </summary>
 		public static void BuildRuntimeTypes() {
-			_runtimeTypes = Array.Empty<RuntimeType>();
-			var assets = GraphEditorUtility.FindAllGraphAssets();
-			var types = new List<RuntimeType>();
-			foreach(var asset in assets) {
-				if(asset == null)
-					continue;
-				if(asset is IReflectionType reflectionType) {
-					var type = reflectionType.ReflectionType;
-					if(type != null) {
-						types.Add(type);
+			m_buildingRuntimeTypes = true;
+			try {
+				_runtimeTypes = Array.Empty<RuntimeType>();
+				m_allRuntimeTypes = Array.Empty<RuntimeType>();
+				m_partialClaimedNames = new HashSet<string>();
+				var assets = GraphEditorUtility.FindAllGraphAssets();
+				var collected = new List<RuntimeTypeEntry>();
+				foreach(var asset in assets) {
+					if(asset == null)
+						continue;
+					if(asset is IReflectionType reflectionType) {
+						var type = reflectionType.ReflectionType;
+						if(type != null) {
+							collected.Add(new RuntimeTypeEntry() { type = type, owner = asset });
+						}
 					}
-				}
-				else if(asset is IScriptGraph scriptGraph) {
-					var scriptTypes = scriptGraph.TypeList.references;
-					foreach(var reference in scriptTypes) {
-						if(reference != null && reference is IReflectionType reflection) {
-							var type = reflection.ReflectionType;
-							if(type != null) {
-								types.Add(type);
+					else if(asset is IScriptGraph scriptGraph) {
+						var scriptTypes = scriptGraph.TypeList.references;
+						foreach(var reference in scriptTypes) {
+							if(reference != null && reference is IReflectionType reflection) {
+								var type = reflection.ReflectionType;
+								if(type != null) {
+									collected.Add(new RuntimeTypeEntry() { type = type, owner = asset });
+								}
 							}
 						}
 					}
 				}
+				var all = new List<RuntimeType>();
+				var canonical = new List<RuntimeType>();
+				var seenNames = new HashSet<string>();
+				foreach(var entry in collected) {
+					if(!entry.type.IsValid())
+						continue;
+					all.Add(entry.type);
+					var fullName = entry.type.FullName;
+					if(fullName != null && seenNames.Add(fullName)) {
+						canonical.Add(entry.type);
+					}
+					if(IsPartialGraph(entry.type)) {
+						m_partialClaimedNames.Add(fullName);
+					}
+				}
+				m_allRuntimeTypes = all.ToArray();
+				_runtimeTypes = canonical.ToArray();
 			}
-			_runtimeTypes = types.Where(t => t.IsValid()).ToArray();
+			finally {
+				m_buildingRuntimeTypes = false;
+			}
+		}
+
+		/// <summary>
+		/// True when the given runtime type presents a partial graph class. Combined
+		/// <see cref="RuntimePartialGraphType"/> instances are partial by definition; raw
+		/// wrappers fall back to probing the owning asset's class modifier.
+		/// </summary>
+		internal static bool IsPartialGraph(RuntimeType type) {
+			if(type is IPartialGraphType)
+				return true;
+			var owner = PartialGraphMembers.GetOwnerAsset(type);
+			if(owner is IClassModifier modifier) {
+				return modifier.GetModifier()?.Partial == true;
+			}
+			return false;
+		}
+
+		private static readonly Dictionary<string, RuntimePartialGraphType> m_partialTypes = new Dictionary<string, RuntimePartialGraphType>();
+
+		/// <summary>
+		/// The one combined <see cref="RuntimePartialGraphType"/> of the partial class under
+		/// the given graph's full name. It is created from the first raw instance that asks
+		/// and reused by every half afterwards, so all ReflectionType getters resolve to the
+		/// same object and consumers always see a single combined type.
+		/// Returns null while the runtime types are being built or when nothing matches.
+		/// Callers are main-thread only (pickers, generation), hence no locking.
+		/// </summary>
+		public static RuntimeType GetOrCreatePartialType(IGraph self, RuntimeType own) {
+			if(m_buildingRuntimeTypes || self == null)
+				return null;
+			var fullName = self.GetFullGraphName();
+			if(string.IsNullOrEmpty(fullName))
+				return null;
+			if(m_partialTypes.TryGetValue(fullName, out var existing)) {
+				return existing;
+			}
+			var target = PartialGraphMembers.GetOwnerAsset(own);
+			if(target == null)
+				return null;
+			var created = new RuntimePartialGraphType(target);
+			m_partialTypes[fullName] = created;
+			return created;
+		}
+
+		/// <summary>
+		/// True when a `partial` graph claims this full name, meaning the plain CLR type of the
+		/// same name is just one half of it and is presented through the graph's merged type.
+		/// </summary>
+		public static bool IsClaimedByPartialGraph(string fullName) {
+			if(string.IsNullOrEmpty(fullName))
+				return false;
+			if(m_partialClaimedNames == null) {
+				BuildRuntimeTypes();
+			}
+			return m_partialClaimedNames.Contains(fullName);
+		}
+
+		/// <summary>
+		/// The full names claimed by `partial` graphs, for read-only filtering. Call this on the
+		/// main thread before handing the set to a worker, since building it uses the
+		/// AssetDatabase.
+		/// </summary>
+		public static HashSet<string> GetPartialClaimedNamesSnapshot() {
+			if(m_partialClaimedNames == null) {
+				BuildRuntimeTypes();
+			}
+			return m_partialClaimedNames;
+		}
+
+		/// <summary>
+		/// The other `partial` halves of the same class: every partial reflection type whose
+		/// full name equals the given graph's, the graph itself excluded. Used to merge sibling
+		/// members into the browsed type so all halves appear as one class.
+		/// </summary>
+		public static IList<RuntimeType> FindSiblingRuntimeTypes(GraphAsset graph) {
+			if(graph == null) {
+				return Array.Empty<RuntimeType>();
+			}
+			var modifier = graph as IClassModifier;
+			if(modifier == null || modifier.GetModifier()?.Partial == false) {
+				return Array.Empty<RuntimeType>();
+			}
+			var fullName = graph.GetFullGraphName();
+			if(string.IsNullOrEmpty(fullName)) {
+				return Array.Empty<RuntimeType>();
+			}
+			if(m_allRuntimeTypes == null) {
+				BuildRuntimeTypes();
+			}
+			List<RuntimeType> result = null;
+			foreach(var type in m_allRuntimeTypes) {
+				var owner = PartialGraphMembers.GetOwnerAsset(type);
+				if(owner == null)
+					continue;
+				//The graph's own entry never counts as its sibling.
+				if(ReferenceEquals(owner, graph))
+					continue;
+				if(owner.GetFullGraphName() != fullName)
+					continue;
+				if(!IsPartialGraph(type)) {
+					continue;
+				}
+				if(result == null) {
+					result = new List<RuntimeType>();
+				}
+				result.Add(type);
+			}
+			if(result == null) {
+				return Array.Empty<RuntimeType>();
+			}
+			return result.ToArray();
 		}
 
 		/// <summary>
@@ -116,7 +265,7 @@ namespace MaxyGames.UNode.Editors {
 			if(_runtimeTypes == null) {
 				BuildRuntimeTypes();
 			}
-			var types = _runtimeTypes;
+			var types = m_allRuntimeTypes;
 			foreach(var type in types) {
 				try {
 					type.Update();

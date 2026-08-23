@@ -1,13 +1,14 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
 namespace MaxyGames.UNode.Editors.Analyzer {
 	/// <summary>
-	/// Validates the relationship between a `partial` graph and its other half.
+	/// Validates the relationship between a `partial` graph and its other half, when one exists.
+	/// A partial graph with no other half is a valid state and reports nothing: the merged
+	/// graph type simply has nothing external to combine.
 	/// </summary>
 	class PartialGraphAnalyzer : GraphAnalyzer {
 		public override bool IsValidAnalyzerForGraph(Type graphType) {
@@ -36,17 +37,18 @@ namespace MaxyGames.UNode.Editors.Analyzer {
 				return;
 			}
 
-			var result = PartialGraphSourceScanner.Scan(asset);
-			if(result == null)
-				return;
-
-			if(result.declarations.Count == 0) {
-				CheckMissingHalf(analyzer, graphData, asset, name, ns, fullName);
+			var otherHalf = PartialGraphMembers.GetOtherHalfType(asset);
+			if(otherHalf != null) {
+				CheckCollisionsWithNative(analyzer, graphData, asset, otherHalf, fullName);
 				return;
 			}
 
+			//The other half exists in source but has not produced a usable CLR type yet
+			//(fresh import or a script compile error): fall back to the syntax scan.
+			var result = PartialGraphSourceScanner.Scan(asset);
+			if(result == null || result.declarations.Count == 0)
+				return;
 			CheckCollisions(analyzer, graphData, asset, result, fullName);
-			CheckUnresolved(analyzer, graphData, result);
 		}
 
 		/// <summary>
@@ -70,21 +72,70 @@ namespace MaxyGames.UNode.Editors.Analyzer {
 		}
 
 		/// <summary>
-		/// The graph is marked `partial` but nothing in the project declares the other half.
+		/// Compares graph-authored members against the real compiled members of the other half,
+		/// which is exact: every kind, visibility, overload and event is visible.
 		/// </summary>
-		private void CheckMissingHalf(
-			ErrorAnalyzer analyzer, UGraphElement graphData, GraphAsset asset, string name, string ns, string fullName) {
-			void autoFix() {
-				CreateStub(asset, name, ns);
+		private void CheckCollisionsWithNative(
+			ErrorAnalyzer analyzer, UGraphElement graphData, GraphAsset asset, Type otherHalf, string fullName) {
+			//Name-keyed map covering all single-member kinds; any overlap between kinds is
+			//as much a duplicate as two fields of one name.
+			var declared = new Dictionary<string, string>();
+			foreach(var variable in asset.GetVariables()) {
+				declared[variable.name] = "variable";
 			}
-			analyzer.RegisterWarning(graphData,
-				$"This graph is marked 'Partial' but no other 'partial' declaration of '{fullName}' was found in the project.\n" +
-				"The generated code is still valid, but nothing is being merged into it.",
-				autoFix);
+			foreach(var property in asset.GetProperties()) {
+				if(!declared.ContainsKey(property.name)) {
+					declared[property.name] = "property";
+				}
+			}
+			foreach(var nativeField in otherHalf.GetFields(MemberData.flags)) {
+				if(IsCompilerGenerated(nativeField.Name))
+					continue;
+				if(declared.TryGetValue(nativeField.Name, out var kind)) {
+					RegisterDuplicate(analyzer, graphData, fullName, nativeField.Name, "field", nativeField.DeclaringType, kind);
+				}
+			}
+			foreach(var nativeProperty in otherHalf.GetProperties(MemberData.flags)) {
+				if(declared.TryGetValue(nativeProperty.Name, out var kind)) {
+					RegisterDuplicate(analyzer, graphData, fullName, nativeProperty.Name, "property", nativeProperty.DeclaringType, kind);
+				}
+			}
+			foreach(var nativeEvent in otherHalf.GetEvents(MemberData.flags)) {
+				if(declared.TryGetValue(nativeEvent.Name, out var kind)) {
+					RegisterDuplicate(analyzer, graphData, fullName, nativeEvent.Name, "event", nativeEvent.DeclaringType, kind);
+				}
+			}
+			//Functions are matched on their full signature so overloads stay legal.
+			var functions = new Dictionary<string, Function>();
+			foreach(var function in asset.GetFunctions()) {
+				var key = MakeSignature(function.name, function.Parameters.Select(p => p.Type));
+				functions[key] = function;
+				if(!declared.ContainsKey(function.name)) {
+					declared[function.name] = "function";
+				}
+			}
+			foreach(var nativeMethod in otherHalf.GetMethods(MemberData.flags)) {
+				if(nativeMethod.IsSpecialName)
+					continue;
+				var key = MakeSignature(nativeMethod.Name, nativeMethod.GetParameters().Select(p => p.ParameterType));
+				if(functions.TryGetValue(key, out var function)) {
+					//A bodyless `partial` function in the graph is a declaration waiting for
+					//this exact implementation, not a duplicate.
+					if(function.modifier != null && function.modifier.Partial)
+						continue;
+					RegisterDuplicate(analyzer, graphData, fullName, nativeMethod.Name, "method", nativeMethod.DeclaringType, "function");
+					continue;
+				}
+				//A method sharing its bare name with a non-method member will not compile either.
+				if(declared.TryGetValue(nativeMethod.Name, out var kind) && kind != "function") {
+					RegisterDuplicate(analyzer, graphData, fullName, nativeMethod.Name, "method", nativeMethod.DeclaringType, kind);
+				}
+			}
 		}
 
 		/// <summary>
-		/// A member exists on both sides, which the C# compiler rejects as a duplicate (CS0102/CS0111).
+		/// Fallback collision check over the syntax scan, used while the other half has no
+		/// compiled type yet.
 		/// </summary>
 		private void CheckCollisions(
 			ErrorAnalyzer analyzer, UGraphElement graphData, GraphAsset asset,
@@ -115,6 +166,23 @@ namespace MaxyGames.UNode.Editors.Analyzer {
 			}
 		}
 
+		private void RegisterDuplicate(
+			ErrorAnalyzer analyzer, UGraphElement graphData, string fullName,
+			string memberName, string halfKind, Type declaringType, string graphKind) {
+			analyzer.RegisterError(graphData,
+				$"'{memberName}' ({halfKind}) is declared both by this graph ({graphKind}) and by the other half in " +
+				$"'{declaringType?.Assembly.GetName().Name ?? "source"}'. '{fullName}' will not compile until one of them is removed.");
+		}
+
+		private static string MakeSignature(string name, IEnumerable<Type> parameters) {
+			return name + "(" + string.Join(",", parameters.Select(p => p != null ? p.FullName : "?")) + ")";
+		}
+
+		private static bool IsCompilerGenerated(string memberName) {
+			//Auto-property backing fields (`<Foo>k__BackingField`) are never authored members.
+			return !string.IsNullOrEmpty(memberName) && memberName.StartsWith("<");
+		}
+
 		/// <summary>
 		/// True when the graph side of this method is a bodyless `partial` declaration,
 		/// which is meant to be implemented by the other half.
@@ -127,48 +195,6 @@ namespace MaxyGames.UNode.Editors.Analyzer {
 					return true;
 			}
 			return false;
-		}
-
-		/// <summary>
-		/// Members the scanner had to skip, so they do not silently go missing from the graph.
-		/// </summary>
-		private void CheckUnresolved(
-			ErrorAnalyzer analyzer, UGraphElement graphData, PartialGraphSourceScanner.ScanResult result) {
-			var names = new List<string>();
-			foreach(var declaration in result.declarations) {
-				names.AddRange(declaration.unresolved);
-			}
-			if(names.Count == 0)
-				return;
-			analyzer.RegisterWarning(graphData,
-				"These members of the other half could not be resolved from source and are not available in the graph: " +
-				string.Join(", ", names) + ".\n" +
-				"This usually means their type comes from an assembly the graph does not reference, or it is generic or inferred.");
-		}
-
-		private static void CreateStub(GraphAsset asset, string name, string ns) {
-			var assetPath = AssetDatabase.GetAssetPath(asset);
-			var directory = string.IsNullOrEmpty(assetPath) ? "Assets" : Path.GetDirectoryName(assetPath);
-			var path = AssetDatabase.GenerateUniqueAssetPath(
-				(directory + "/" + name + ".Partial.cs").Replace('\\', '/'));
-
-			var contents = string.Empty;
-			var indent = string.Empty;
-			if(!string.IsNullOrEmpty(ns)) {
-				contents += "namespace " + ns + " {\n";
-				indent = "\t";
-			}
-			contents += indent + "partial class " + name + " {\n";
-			contents += indent + "\t//Members declared here become available inside the graph.\n";
-			contents += indent + "}\n";
-			if(!string.IsNullOrEmpty(ns)) {
-				contents += "}\n";
-			}
-
-			File.WriteAllText(path, contents);
-			AssetDatabase.ImportAsset(path);
-			PartialGraphSourceScanner.InvalidateCache();
-			Debug.Log($"[uNode] Created the other half of '{name}' at '{path}'.");
 		}
 	}
 }

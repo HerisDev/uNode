@@ -177,11 +177,11 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		void ShowAddMenu() {
-			var menu = new GenericDropdownMenu();
-			menu.AddItem("Folder", false, () => CreateNewFolder());
-			menu.AddItem("Namespace", false, () => AddNamespaceFavorite());
-			menu.AddItem("Type / Member", false, () => OpenItemSelector());
-			menu.DropDown(new Rect(Event.current.mousePosition, Vector2.zero), toolbar);
+			var menu = new GenericMenu();
+			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder());
+			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite());
+			menu.AddItem(new GUIContent("Type / Member"), false, () => OpenItemSelector());
+			menu.ShowAsContext();
 		}
 
 		private void CreateNewCategory() {
@@ -1553,14 +1553,14 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		void ShowAutoSortMenu() {
-			var menu = new GenericDropdownMenu();
-			menu.AddItem("Name (A-Z)", false, () => AutoSort((a, b) => string.Compare(GetDisplayName(a), GetDisplayName(b), StringComparison.OrdinalIgnoreCase)));
-			menu.AddItem("Name (Z-A)", false, () => AutoSort((a, b) => string.Compare(GetDisplayName(b), GetDisplayName(a), StringComparison.OrdinalIgnoreCase)));
-			menu.AddItem("Kind", false, () => AutoSort((a, b) => {
+			var menu = new GenericMenu();
+			menu.AddItem(new GUIContent("Name (A-Z)"), false, () => AutoSort((a, b) => string.Compare(GetDisplayName(a), GetDisplayName(b), StringComparison.OrdinalIgnoreCase)));
+			menu.AddItem(new GUIContent("Name (Z-A)"), false, () => AutoSort((a, b) => string.Compare(GetDisplayName(b), GetDisplayName(a), StringComparison.OrdinalIgnoreCase)));
+			menu.AddItem(new GUIContent("Kind"), false, () => AutoSort((a, b) => {
 				int c = ((int)a.kind).CompareTo((int)b.kind);
 				return c != 0 ? c : string.Compare(GetDisplayName(a), GetDisplayName(b), StringComparison.OrdinalIgnoreCase);
 			}));
-			menu.DropDown(new Rect(Event.current.mousePosition, Vector2.zero), toolbar);
+			menu.ShowAsContext();
 		}
 
 		void AutoSort(Comparison<FavoritesDataAsset.Entry> comparer) {

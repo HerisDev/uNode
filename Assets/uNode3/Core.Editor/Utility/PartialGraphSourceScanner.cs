@@ -39,10 +39,17 @@ namespace MaxyGames.UNode.Editors {
 
 		static PartialGraphSourceScanner() {
 			PartialGraphMembers.provider = graph => Scan(graph)?.members;
+			//The merged graph type reflects over the real compiled class of the other half.
+			PartialGraphMembers.typeProvider = ResolveOtherHalfType;
+			//And over the other partial graphs sharing the same class name.
+			PartialGraphMembers.siblingProvider = graph => EditorReflectionUtility.FindSiblingRuntimeTypes(graph);
+			//Every partial half presents the one combined RuntimePartialGraphType to all consumers.
+			PartialGraphMembers.partialTypeProvider = EditorReflectionUtility.GetOrCreatePartialType;
 		}
 
 		#region Cache
 		private static Dictionary<string, ScanResult> m_cache = new Dictionary<string, ScanResult>();
+		private static Dictionary<string, Type> m_halfTypeCache = new Dictionary<string, Type>();
 		private static Dictionary<string, List<string>> m_partialIndex;
 
 		/// <summary>
@@ -60,6 +67,7 @@ namespace MaxyGames.UNode.Editors {
 		public static void InvalidateCache() {
 			m_cache.Clear();
 			m_typeCache.Clear();
+			m_halfTypeCache.Clear();
 			m_partialIndex = null;
 		}
 
@@ -242,6 +250,49 @@ namespace MaxyGames.UNode.Editors {
 				result.members.AddRange(declaration.members);
 			}
 			m_cache[key] = result;
+			return result;
+		}
+
+		/// <summary>
+		/// The compiled CLR type of the hand-written half of the given graph, or null when the
+		/// graph has none. The hand-written script compiles with the project, so once it exists
+		/// in source its class is reachable through normal reflection; no generated output and
+		/// no C# partial merge are required for the graph to see its members.
+		/// A null result is a normal state, not an error: being marked `partial` no longer
+		/// implies that another half must exist.
+		/// </summary>
+		public static Type ResolveOtherHalfType(GraphAsset graph) {
+			if(graph == null)
+				return null;
+			var modifier = graph as IClassModifier;
+			if(modifier == null || modifier.GetModifier().Partial == false)
+				return null;
+			var name = graph.GetGraphName();
+			if(string.IsNullOrEmpty(name))
+				return null;
+			var ns = graph.GetGraphNamespace() ?? string.Empty;
+			//Same key shape as Scan: two graphs may share a name while excluding different scripts.
+			var key = uNodeUtility.GetObjectID(graph) + ":" + (string.IsNullOrEmpty(ns) ? name : ns + "." + name);
+
+			if(m_halfTypeCache.TryGetValue(key, out var cached))
+				return cached;
+
+			Type result = null;
+			//Only resolve when an other half actually declares itself somewhere in source,
+			//so a lone partial graph never picks up an unrelated class of the same name.
+			if(FindOtherHalfDeclarationPaths(graph, name).Count > 0) {
+				var fullName = string.IsNullOrEmpty(ns) ? name : ns + "." + name;
+				result = RoslynUtility.GetTypeFromTypeName(fullName);
+				if(result == null) {
+					result = fullName.ToType(false);
+				}
+				//uNode runtime wrappers are never a hand-written half; they would only appear
+				//here if the name collided with a graph type, which we must not merge.
+				if(result is RuntimeType) {
+					result = null;
+				}
+			}
+			m_halfTypeCache[key] = result;
 			return result;
 		}
 

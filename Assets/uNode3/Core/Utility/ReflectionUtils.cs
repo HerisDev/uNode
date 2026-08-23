@@ -1486,6 +1486,15 @@ namespace MaxyGames.UNode {
 			return true;
 		}
 
+		public static bool IsValidMember(EventInfo member, BindingFlags flags, Type source = null) {
+			if(member == null) return false;
+			var accessor = member.GetAddMethod(true) ?? member.GetRemoveMethod(true);
+			if(accessor != null) {
+				return IsValidMember(accessor, flags, source);
+			}
+			return true;
+		}
+
 		public static bool IsValidMember(ConstructorInfo member, BindingFlags flags, Type source = null) {
 			if(member == null) return false;
 			if(member.IsPublic && flags.HasFlags(BindingFlags.Public) == false)
@@ -1526,6 +1535,8 @@ namespace MaxyGames.UNode {
 					return IsValidMember(member as Type, flags, source);
 				case MemberTypes.Property:
 					return IsValidMember(member as PropertyInfo, flags, source);
+				case MemberTypes.Event:
+					return IsValidMember(member as EventInfo, flags, source);
 			}
 			return true;
 		}
@@ -1563,6 +1574,16 @@ namespace MaxyGames.UNode {
 
 		internal static List<MethodInfo> GetMethodCandidates(IList<MethodInfo> members, BindingFlags flags, Type source = null) {
 			var result = new List<MethodInfo>(members.Count);
+			foreach(var m in members) {
+				if(IsValidMember(m, flags, source)) {
+					result.Add(m);
+				}
+			}
+			return result;
+		}
+
+		internal static List<EventInfo> GetEventCandidates(IList<EventInfo> members, BindingFlags flags, Type source = null) {
+			var result = new List<EventInfo>(members.Count);
 			foreach(var m in members) {
 				if(IsValidMember(m, flags, source)) {
 					result.Add(m);

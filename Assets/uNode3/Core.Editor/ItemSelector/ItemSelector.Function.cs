@@ -176,7 +176,7 @@ namespace MaxyGames.UNode.Editors {
 										prog?.Invoke(sp);
 										var allTypes = GetAllTypes((currProgress) => {
 											prog?.Invoke(currProgress);
-										}, true, true);
+										}, true, true, EditorReflectionUtility.GetPartialClaimedNamesSnapshot());
 										sp.info = "Setup Items";
 										for(int i = 0; i < allTypes.Count; i++) {
 											var pair = allTypes[i];
@@ -358,7 +358,8 @@ namespace MaxyGames.UNode.Editors {
 			Action<float> onProgress = null,
 			bool includeGlobal = false, bool
 			includeExcludedType = false,
-			bool ignoreIncludedAssemblies = false) {
+			bool ignoreIncludedAssemblies = false,
+			HashSet<string> claimedByPartialGraphs = null) {
 
 
 			onProgress?.Invoke(0);
@@ -429,9 +430,11 @@ namespace MaxyGames.UNode.Editors {
 						type.Name.StartsWith("<", StringComparison.Ordinal) ||
 						type.IsNested ||
 						ignoredTypes.Contains(type) ||
-						//type.IsCastableTo(typeof(Delegate)) ||
 						!showObsolete && (type.IsDefinedAttribute(typeof(ObsoleteAttribute)) || type.IsDefinedAttribute(typeof(System.ComponentModel.EditorBrowsableAttribute))) ||
-						!includeExcludedType && excludedTypes.Contains(type.FullName))
+						!includeExcludedType && excludedTypes.Contains(type.FullName) ||
+						//A partial graph owns this name: its merged type is listed under the
+						//generated types instead, so the plain half would only duplicate it.
+						claimedByPartialGraphs != null && claimedByPartialGraphs.Contains(type.FullName))
 						continue;
 
 					//if(excludedNS.Contains(ns)) {
@@ -475,7 +478,7 @@ namespace MaxyGames.UNode.Editors {
 			return typeList;
 		}
 
-		static List<KeyValuePair<string, List<Type>>> GetAllTypes(Action<SearchProgress> onProgress = null, bool includeGlobal = false, bool includeExcludedType = false) {
+		static List<KeyValuePair<string, List<Type>>> GetAllTypes(Action<SearchProgress> onProgress = null, bool includeGlobal = false, bool includeExcludedType = false, HashSet<string> claimedByPartialGraphs = null) {
 			var progress = new SearchProgress();
 			onProgress?.Invoke(progress);
 			Dictionary<string, List<Type>> typeMaps = new Dictionary<string, List<Type>>();
@@ -504,9 +507,10 @@ namespace MaxyGames.UNode.Editors {
 						type.Name.StartsWith("<", StringComparison.Ordinal) ||
 						type.IsNested ||
 						ignoredTypes.Contains(type) ||
-						//type.IsCastableTo(typeof(Delegate)) ||
 						!showObsolete && (type.IsDefinedAttribute(typeof(ObsoleteAttribute)) || type.IsDefinedAttribute(typeof(System.ComponentModel.EditorBrowsableAttribute))) ||
-						!includeExcludedType && excludedTypes.Contains(type.FullName))
+						!includeExcludedType && excludedTypes.Contains(type.FullName) ||
+						//A partial graph owns this name: skip the plain half like in GetNamespaceTypes.
+						claimedByPartialGraphs != null && claimedByPartialGraphs.Contains(type.FullName))
 						continue;
 
 					//if(excludedNS.Contains(ns)) {

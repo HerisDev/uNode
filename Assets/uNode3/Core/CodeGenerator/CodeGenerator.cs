@@ -1851,8 +1851,35 @@ namespace MaxyGames {
 			}
 		}
 
+		/// <summary>
+		/// True when the runtime member is declared by the merged class of the graph currently
+		/// being generated: its own half or a sibling half of the same `partial` class.
+		/// Each half declares its own members and C# partial merging unifies them into one
+		/// class, so such members are emitted as direct member accesses instead of going
+		/// through the IRuntimeClass variable bridge.
+		/// </summary>
+		private static bool IsMergedPartialMember(MemberInfo member) {
+			var owner = PartialGraphMembers.GetOwnerAsset(member.DeclaringType as RuntimeType);
+			if(owner == null || graph == null)
+				return false;
+			//Identity is compared by full class name: every half of one partial class shares it.
+			var fullName = graph.GetFullGraphName();
+			if(string.IsNullOrEmpty(fullName))
+				return false;
+			if(owner.GetFullGraphName() == fullName)
+				return true;
+			foreach(var sibling in PartialGraphMembers.GetSiblingReflectionTypes(graph as GraphAsset)) {
+				if(sibling != null && PartialGraphMembers.GetOwnerAsset(sibling)?.GetFullGraphName() == fullName)
+					return true;
+			}
+			return false;
+		}
+
 		private static string GenerateGetRuntimeVariable(RuntimeField field) {
 			if(generatePureScript && !(field.DeclaringType is IFakeMember)) {
+				return field.Name;
+			}
+			if((field is RuntimeGraphField || field is RuntimeGraphExternalField) && IsMergedPartialMember(field)) {
 				return field.Name;
 			}
 			else {
@@ -1862,6 +1889,9 @@ namespace MaxyGames {
 
 		private static string GenerateGetRuntimeProperty(RuntimeProperty property) {
 			if(generatePureScript && !(property.DeclaringType is IFakeMember)) {
+				return property.Name;
+			}
+			if((property is RuntimeGraphProperty || property is RuntimeGraphExternalProperty) && IsMergedPartialMember(property)) {
 				return property.Name;
 			}
 			else {
@@ -1984,6 +2014,14 @@ namespace MaxyGames {
 			}
 			if(generatePureScript) {
 				return method.Name + "(" + data + ")";
+			}
+			else if((method is RuntimeGraphMethod || method is RuntimeGraphExternalMethod) && IsMergedPartialMember(method)) {
+				//A member of the merged partial class: call it directly like the pure path.
+				var direct = method.Name + "(" + data + ")";
+				if(autoConvert && method.ReturnType != typeof(void)) {
+					direct = direct.CGConvert(method.ReturnType, true);
+				}
+				return direct;
 			}
 			else {
 				RegisterUsingNamespace("MaxyGames.UNode");

@@ -567,6 +567,9 @@ namespace MaxyGames.UNode.Editors {
 		public class DataSetup : IDisposable {
 			public List<KeyValuePair<string, List<Type>>> typeList;
 			private Thread setupThread;
+			//Captured on the main thread before the setup task starts, because building it
+			//requires the AssetDatabase which must not be touched from a worker thread.
+			private HashSet<string> m_claimedByPartialGraphs;
 
 			public bool isFinished => progress == 1;
 			public float progress;
@@ -583,6 +586,7 @@ namespace MaxyGames.UNode.Editors {
 					setupThread.Join(500);
 					setupThread = null;
 				}
+				m_claimedByPartialGraphs = EditorReflectionUtility.GetPartialClaimedNamesSnapshot();
 				SetupNamespaces(data.targetObject);
 				setupThread = new Thread(() => SetupProgress(onProgress));
 				setupThread.Priority = System.Threading.ThreadPriority.Highest;
@@ -613,7 +617,8 @@ namespace MaxyGames.UNode.Editors {
 				typeList = GetNamespaceTypes(data.usingNamespaces, (p) => {
 					progress = p;
 					onProgress?.Invoke(p);
-				}, includeGlobal: true, ignoreIncludedAssemblies: uNodePreference.preferenceData.ignoreIncludedAssemblies);
+				}, includeGlobal: true, ignoreIncludedAssemblies: uNodePreference.preferenceData.ignoreIncludedAssemblies,
+					claimedByPartialGraphs: m_claimedByPartialGraphs);
 			}
 
 			public void Dispose() {
@@ -1439,37 +1444,37 @@ namespace MaxyGames.UNode.Editors {
 						}
 					}
 					if(graph != null) {
-						if(filter.OnlyGetType == false && filter.UnityReference) {
-							var graphItem = new List<GraphItem>();
-							if(filter.IsValidTarget(MemberData.TargetType.uNodeVariable)) {
-								graphItem.AddRange(graph.variableContainer.GetObjects().Select(item => new GraphItem(item, graph)));
-							}
-							if(filter.IsValidTarget(MemberData.TargetType.uNodeProperty)) {
-								graphItem.AddRange(graph.propertyContainer.GetObjects().Select(item => new GraphItem(item, graph)));
-							}
-							if(!filter.SetMember && filter.IsValidTarget(MemberData.TargetType.uNodeFunction)) {
-								graphItem.AddRange(graph.functionContainer.GetObjects().Where(item => IsCorrectItem(item, filter)).Select(item => new GraphItem(item, graph)));
-							}
-							graphItem.Sort((x, y) => string.Compare(x.Name, y.Name, StringComparison.OrdinalIgnoreCase));
-							RemoveIncorrectGraphItem(graphItem, filter);
-							if(graphItem != null && graphItem.Count > 0) {
-								var categTree = new SelectorCategoryTreeView("Graph (Self)", "", uNodeEditorUtility.GetUIDFromString("[GRAPH-SELF]"), BonusRelevantScore.SelfScore) {
-									bonusScore = 1f,
-									expanded = true,
-								};
-								categTree.expanded = true;
-								graphItem.ForEach(item => categTree.AddChild(new SelectorCustomTreeView(item, item.GetHashCode(), -1)));
-								result.Add(categTree);
-							}
+					if(filter.OnlyGetType == false && filter.UnityReference) {
+						var graphItem = new List<GraphItem>();
+						if(filter.IsValidTarget(MemberData.TargetType.uNodeVariable)) {
+							graphItem.AddRange(graph.variableContainer.GetObjects().Select(item => new GraphItem(item, graph)));
 						}
-						if(graph.graphContainer is IClassGraph && filter.Inherited) {
-							var tree = CreateTargetItem(graph.graphContainer, "Graph Inherit Member", filter, bonusScore: 0.5f);
-							if(tree != null) {
-								tree.expanded = false;
-								result.Add(tree);
-							}
+						if(filter.IsValidTarget(MemberData.TargetType.uNodeProperty)) {
+							graphItem.AddRange(graph.propertyContainer.GetObjects().Select(item => new GraphItem(item, graph)));
+						}
+						if(!filter.SetMember && filter.IsValidTarget(MemberData.TargetType.uNodeFunction)) {
+							graphItem.AddRange(graph.functionContainer.GetObjects().Where(item => IsCorrectItem(item, filter)).Select(item => new GraphItem(item, graph)));
+						}
+						graphItem.Sort((x, y) => string.Compare(x.Name, y.Name, StringComparison.OrdinalIgnoreCase));
+						RemoveIncorrectGraphItem(graphItem, filter);
+						if(graphItem != null && graphItem.Count > 0) {
+							var categTree = new SelectorCategoryTreeView("Graph (Self)", "", uNodeEditorUtility.GetUIDFromString("[GRAPH-SELF]"), BonusRelevantScore.SelfScore) {
+								bonusScore = 1f,
+								expanded = true,
+							};
+							categTree.expanded = true;
+							graphItem.ForEach(item => categTree.AddChild(new SelectorCustomTreeView(item, item.GetHashCode(), -1)));
+							result.Add(categTree);
 						}
 					}
+					if(graph.graphContainer is IClassGraph && filter.Inherited) {
+						var tree = CreateTargetItem(graph.graphContainer, "Graph Inherit Member", filter, bonusScore: 0.5f);
+						if(tree != null) {
+							tree.expanded = false;
+							result.Add(tree);
+						}
+					}
+				}
 				}
 				Graph targetGraph = GraphEditorUtility.GetGraphData(targetObject);
 				if(targetGraph != null && targetGraph != graph) {
@@ -1683,32 +1688,25 @@ namespace MaxyGames.UNode.Editors {
 						FilterAttribute fil = new FilterAttribute(filter);
 						fil.NestedType = false;
 						fil.NonPublic = true;
-						//Both halves of a `partial` graph compile into one class, so the other half
-						//members - private ones included - are reachable from in here. They are not on
-						//the inherited type browsed below, so they are pulled from the graph own type.
-						//Matching on the scanned names covers both shapes that type can take: a
-						//RuntimeGraphType while the graph is interpreted, and the real compiled type
-						//once it has been generated to C#.
-						if(targetValue is GraphAsset partialAsset && targetValue is IReflectionType reflectionType) {
-							var otherHalf = PartialGraphMembers.Get(partialAsset);
-							if(otherHalf.Count > 0) {
-								var names = new HashSet<string>();
-								foreach(var member in otherHalf) {
-									names.Add(member.name);
-								}
-								var otherHalfItems = CreateItemsFromType(
-									reflectionType.ReflectionType,
-									//Private is on because the other half is the same class: its private
-									//members are legally reachable from here, unlike a base type private.
-									new FilterAttribute(fil) { Static = false, NonPublic = true, Private = true },
-									false,
-									(Func<MemberInfo, float>)(m => names.Contains(m.Name) ? 1f : -1f));
-								if(otherHalfItems != null) {
-									otherHalfItems.ForEach(tree => {
-										tree.instance = targetValue;
-										categoryTree.AddChild(tree);
-									});
-								}
+						//Both halves of a `partial` graph compile into one class, so every half's
+						//members - the hand-written script and other partial graphs alike - live
+						//on the graph reflection type itself and are legally reachable from in
+						//here, privates included. Only the type own declarations are listed;
+						//base members follow through the inherited browse below.
+						if(targetValue is GraphAsset && targetValue is IReflectionType reflectionType &&
+							EditorReflectionUtility.IsPartialGraph(reflectionType.ReflectionType)) {
+							var otherHalfItems = CreateItemsFromType(
+								reflectionType.ReflectionType,
+								//Private is on because the other half is the same class: its private
+								//members are legally reachable from here, unlike a base type private.
+								new FilterAttribute(fil) { Static = false, NonPublic = true, Private = true },
+								false,
+								(Func<MemberInfo, float>)(m => ReferenceEquals(m.DeclaringType, reflectionType.ReflectionType) ? 1f : -1f));
+							if(otherHalfItems != null) {
+								otherHalfItems.ForEach(tree => {
+									tree.instance = targetValue;
+									categoryTree.AddChild(tree);
+								});
 							}
 						}
 						var items = CreateItemsFromType(rootType, new FilterAttribute(fil) { Static = false }, false);
