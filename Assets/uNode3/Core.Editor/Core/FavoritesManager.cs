@@ -23,6 +23,18 @@ namespace MaxyGames.UNode.Editors {
 	}
 
 	/// <summary>
+	/// How a type item's generated member list behaves.
+	/// The stored name list flips meaning with the mode:
+	/// IncludeAll → names are hidden members; ExcludeAll → names are visible members.
+	/// </summary>
+	public enum TypeMemberMode {
+		/// <summary>All generated members are shown unless excluded by name.</summary>
+		IncludeAll = 0,
+		/// <summary>No generated members are shown unless included by name.</summary>
+		ExcludeAll = 1,
+	}
+
+	/// <summary>
 	/// ScriptableSingleton container for all favorites data.
 	/// Persisted automatically by Unity inside Library/ScriptableSingletons
 	/// (outside the Assets folder) using Unity's native serializer so that
@@ -74,8 +86,14 @@ namespace MaxyGames.UNode.Editors {
 			/// <summary>The display name (folder name or namespace string).</summary>
 			public string displayName;
 
-			/// <summary>Members excluded from this type favorite.</summary>
+			/// <summary>
+			/// Member names list for this type favorite. Its meaning flips with
+			/// memberMode: hidden members in IncludeAll, visible members in ExcludeAll.
+			/// </summary>
 			public List<string> excludedMembers = new List<string>();
+
+			/// <summary>How the generated member list behaves (see TypeMemberMode).</summary>
+			public TypeMemberMode memberMode = TypeMemberMode.IncludeAll;
 
 			/// <summary>
 			/// The resolved System.Type of this entry (declaring type for members).
@@ -501,8 +519,9 @@ namespace MaxyGames.UNode.Editors {
 
 		/// <summary>
 		/// Read-only: generate virtual member entries for the given type item.
-		/// Members are never persisted — they are bound to their type and hidden
-		/// by adding their name to the entry's excludedMembers list.
+		/// Members are never persisted — they are bound to their type, and their
+		/// visibility is driven by memberMode + the entry's excludedMembers list
+		/// (hidden names in IncludeAll, visible names in ExcludeAll).
 		/// </summary>
 		public static List<FavoritesDataAsset.Entry> GetVirtualTypeMembers(FavoritesDataAsset.Entry typeEntry) {
 			var result = new List<FavoritesDataAsset.Entry>();
@@ -520,11 +539,14 @@ namespace MaxyGames.UNode.Editors {
 				return result;
 			}
 			string declName = type.FullName ?? type.Name;
+			bool excludeAll = typeEntry.memberMode == TypeMemberMode.ExcludeAll;
 			foreach(var m in members) {
 				if(m is EventInfo) continue;
 				if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
-				// Hidden via the persisted exclusion list.
-				if(typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(m.Name))
+				bool inList = typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(m.Name);
+				// IncludeAll: list holds hidden members; ExcludeAll: list holds visible ones.
+				bool visible = excludeAll ? inList : !inList;
+				if(!visible)
 					continue;
 				result.Add(new FavoritesDataAsset.Entry {
 					id = "[member]:" + declName + "::" + m.Name + "::" + m.MetadataToken,

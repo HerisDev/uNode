@@ -1443,14 +1443,12 @@ namespace MaxyGames.UNode.Editors {
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
 				} else if(e.kind == FavoriteKind.Member && e.targetMember != null) {
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
-					// Removing a generated member persists it in the type's exclusions.
+					// Removing a generated member persists it in the type's mode list.
 					var owner = ResolveOwningType(e);
-					if(owner != null) {
-						string memberName = e.memberName ?? FavoritesManager.GetEntryMember(e)?.Name;
-						if(!string.IsNullOrEmpty(memberName)) {
-							evt.menu.AppendSeparator();
-							evt.menu.AppendAction("Remove", _ => SetMemberExcluded(owner, memberName, true));
-						}
+					var ownerMember = FavoritesManager.GetEntryMember(e);
+					if(owner != null && ownerMember != null) {
+						evt.menu.AppendSeparator();
+						evt.menu.AppendAction("Remove", _ => SetMemberVisible(owner, ownerMember, false));
 					}
 				}
 				evt.StopPropagation();
@@ -1584,31 +1582,20 @@ namespace MaxyGames.UNode.Editors {
 				if(typeHeader == null) return;
 
 				if(created) {
-					// New type item: show ONLY the picked member — exclude the rest.
-					// Candidates must match GetVirtualTypeMembers' enumeration exactly.
+					// Picking a member on a brand-new type: start in ExcludeAll mode
+					// so ONLY the picked member is visible; the user can flip to
+					// Include All from the Members-of popup at any time.
+					typeHeader.memberMode = TypeMemberMode.ExcludeAll;
+					typeHeader.excludedMembers?.Clear();
 					if(typeHeader.excludedMembers == null)
 						typeHeader.excludedMembers = new List<string>();
-					MemberInfo[] candidates;
-					try {
-						candidates = declType.GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-					}
-					catch {
-						candidates = Array.Empty<MemberInfo>();
-					}
-					foreach(var c in candidates) {
-						if(c is EventInfo) continue;
-						if(c is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
-						if(c.Name == last.Name) continue;
-						if(!typeHeader.excludedMembers.Contains(c.Name))
-							typeHeader.excludedMembers.Add(c.Name);
-					}
-					typeHeader.excludedMembers.Remove(last.Name);
+					typeHeader.excludedMembers.Add(last.Name);
 					FavoritesManager.Save();
 					FavoritesManager.NotifyChanged();
 				}
 				else {
-					// Existing type item: just un-hide the picked member.
-					SetMemberExcluded(typeHeader, last.Name, false);
+					// Existing type item: just make the picked member visible.
+					SetMemberVisible(typeHeader, last, true);
 				}
 			}
 			ReloadTreeView();
@@ -1631,12 +1618,13 @@ namespace MaxyGames.UNode.Editors {
 			if(selectedEntry == null || selectedEntry.entry == null)
 				return;
 			var e = selectedEntry.entry;
-			// Generated members are removed by persisting an exclusion on their type.
+			// Generated members are removed by persisting their visibility state
+			// on the owning type (mode-aware: exclusion in IncludeAll, omission in ExcludeAll).
 			if(e.kind == FavoriteKind.Member && e.isVirtual) {
 				var owner = ResolveOwningType(e);
-				string memberName = e.memberName ?? FavoritesManager.GetEntryMember(e)?.Name;
-				if(owner != null && !string.IsNullOrEmpty(memberName)) {
-					SetMemberExcluded(owner, memberName, true);
+				var ownerMember = FavoritesManager.GetEntryMember(e);
+				if(owner != null && ownerMember != null) {
+					SetMemberVisible(owner, ownerMember, false);
 					selectedEntry = null;
 					UpdateDetailPanel();
 					UpdateAddMembersButton();
@@ -1699,23 +1687,52 @@ namespace MaxyGames.UNode.Editors {
 			var toggles = new List<(Toggle toggle, MemberInfo member)>();
 			void RefreshToggles() {
 				foreach(var entry in toggles) {
-					entry.toggle.SetValueWithoutNotify(!IsMemberExcluded(typeEntry, entry.member));
+					entry.toggle.SetValueWithoutNotify(IsMemberVisible(typeEntry, entry.member));
 				}
 			}
 
-			// ── Toolbar: Select All / Deselect All / spacer / Close ──
-			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6 } };
+			// ── Toolbar: mode switch / Select All / Deselect All / spacer / Close ──
+			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6, flexWrap = Wrap.Wrap } };
 			Button CreateToolbarButton(string text, Action onClick) {
 				return new Button(onClick) { text = text };
 			}
-			toolbarRow.Add(CreateToolbarButton("Select All", () => {
-				foreach(var m in members) SetMemberExcluded(typeEntry, m.Name, false);
+
+			// Mode switch: Include All ⇄ Exclude All. The persisted name list is
+			// preserved — its meaning (hidden ⇄ visible) flips with the mode.
+			var includeBtn = CreateToolbarButton("Include All", null);
+			var excludeBtn = CreateToolbarButton("Exclude All", null);
+			void SetModeButtons(TypeMemberMode mode) {
+				bool include = mode == TypeMemberMode.IncludeAll;
+				includeBtn.SetEnabled(!include);
+				excludeBtn.SetEnabled(include);
+			}
+			includeBtn.clicked += () => {
+				if(typeEntry.memberMode == TypeMemberMode.IncludeAll) return;
+				typeEntry.memberMode = TypeMemberMode.IncludeAll;
+				FavoritesManager.Save();
+				FavoritesManager.NotifyChanged();
+				SetModeButtons(typeEntry.memberMode);
 				RefreshToggles();
-			}));
-			toolbarRow.Add(CreateToolbarButton("Deselect All", () => {
-				foreach(var m in members) SetMemberExcluded(typeEntry, m.Name, true);
+			};
+			excludeBtn.clicked += () => {
+				if(typeEntry.memberMode == TypeMemberMode.ExcludeAll) return;
+				typeEntry.memberMode = TypeMemberMode.ExcludeAll;
+				FavoritesManager.Save();
+				FavoritesManager.NotifyChanged();
+				SetModeButtons(typeEntry.memberMode);
 				RefreshToggles();
-			}));
+			};
+			toolbarRow.Add(includeBtn);
+			toolbarRow.Add(excludeBtn);
+			SetModeButtons(typeEntry.memberMode);
+
+			void SelectAllVisible(bool visible) {
+				foreach(var m in members)
+					SetMemberVisible(typeEntry, m, visible);
+				RefreshToggles();
+			}
+			toolbarRow.Add(CreateToolbarButton("Select All", () => SelectAllVisible(true)));
+			toolbarRow.Add(CreateToolbarButton("Deselect All", () => SelectAllVisible(false)));
 			var spacer = new VisualElement { style = { flexGrow = 1 } };
 			toolbarRow.Add(spacer);
 			toolbarRow.Add(CreateToolbarButton("Close", () => ActionPopupWindow.CloseLast()));
@@ -1724,7 +1741,7 @@ namespace MaxyGames.UNode.Editors {
 			// ── Member list ──
 			var scroll = new ScrollView(ScrollViewMode.Vertical) { style = { maxHeight = 360 } };
 			foreach(var m in members) {
-				bool current = !IsMemberExcluded(typeEntry, m);
+				bool current = IsMemberVisible(typeEntry, m);
 				var row = new VisualElement {
 					style = {
 						flexDirection = FlexDirection.Row, alignItems = Align.Center,
@@ -1733,7 +1750,7 @@ namespace MaxyGames.UNode.Editors {
 				};
 				var toggle = new Toggle() { value = current };
 				MemberInfo captured = m;
-				toggle.RegisterValueChangedCallback(evt => SetMemberExcluded(typeEntry, captured.Name, !evt.newValue));
+				toggle.RegisterValueChangedCallback(evt => SetMemberVisible(typeEntry, captured, evt.newValue));
 				row.Add(toggle);
 
 				var icon = new Image { image = GetMemberKindIcon(m) };
@@ -1761,23 +1778,29 @@ namespace MaxyGames.UNode.Editors {
 			return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.ExtensionIcon));
 		}
 
-		static bool IsMemberExcluded(FavoritesDataAsset.Entry typeEntry, MemberInfo member) {
-			return typeEntry?.excludedMembers != null && typeEntry.excludedMembers.Contains(member.Name);
+		static bool IsMemberVisible(FavoritesDataAsset.Entry typeEntry, MemberInfo member) {
+			if(typeEntry == null || member == null)
+				return false;
+			bool inList = typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(member.Name);
+			return typeEntry.memberMode == TypeMemberMode.ExcludeAll ? inList : !inList;
 		}
 
 		/// <summary>
-		/// Members are generated from their type item; hiding one persists its name
-		/// in the type's excludedMembers list (survives restarts, removed with the type).
+		/// Shows/hides a generated member. The write flips with the type's
+		/// memberMode so the persisted name list keeps a single meaning per mode:
+		/// hidden names in IncludeAll, visible names in ExcludeAll.
 		/// </summary>
-		void SetMemberExcluded(FavoritesDataAsset.Entry typeEntry, string memberName, bool excluded) {
-			if(typeEntry == null || string.IsNullOrEmpty(memberName))
+		void SetMemberVisible(FavoritesDataAsset.Entry typeEntry, MemberInfo member, bool visible) {
+			if(typeEntry == null || member == null)
 				return;
 			if(typeEntry.excludedMembers == null)
 				typeEntry.excludedMembers = new List<string>();
+			string name = member.Name;
+			bool shouldContain = typeEntry.memberMode == TypeMemberMode.ExcludeAll ? visible : !visible;
 			bool changed;
-			if(excluded) {
-				if(!typeEntry.excludedMembers.Contains(memberName)) {
-					typeEntry.excludedMembers.Add(memberName);
+			if(shouldContain) {
+				if(!typeEntry.excludedMembers.Contains(name)) {
+					typeEntry.excludedMembers.Add(name);
 					changed = true;
 				}
 				else {
@@ -1785,7 +1808,7 @@ namespace MaxyGames.UNode.Editors {
 				}
 			}
 			else {
-				changed = typeEntry.excludedMembers.Remove(memberName);
+				changed = typeEntry.excludedMembers.Remove(name);
 			}
 			if(changed) {
 				FavoritesManager.Save();
