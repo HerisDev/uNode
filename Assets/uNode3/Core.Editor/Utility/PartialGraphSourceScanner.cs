@@ -155,10 +155,13 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
-		/// True when the file is this graph own generated C#. Compiling a graph manually writes
-		/// the script beside the asset rather than into the generated folder, and that output is
-		/// `partial` too, so without this check a compiled graph reports every one of its own
-		/// members as a duplicate of itself.
+		/// True when the file is this graph own generated C#. Signals, in order:
+		/// 1. uNode recorded this exact path as the graph output.
+		/// 2. Any other graph's recorded output claims the same path.
+		/// 3. Beside-a-graph convention: `Foo.asset` with `Foo.cs` next to it is assumed to be
+		///    that graph generated output - covering stale outputs made before recording
+		///    existed - unless the persisted generated script proves the file has since
+		///    diverged, which marks it as hand-written and keeps it processed normally.
 		/// </summary>
 		private static bool IsOwnGeneratedScript(GraphAsset graph, string path) {
 			var normalized = NormalizePath(path);
@@ -166,19 +169,26 @@ namespace MaxyGames.UNode.Editors {
 				return false;
 
 			try {
-				//The manual-compile convention: `Foo.asset` generates `Foo.cs` next to it.
-				var assetPath = AssetDatabase.GetAssetPath(graph);
-				if(!string.IsNullOrEmpty(assetPath)) {
-					var beside = NormalizePath(Path.ChangeExtension(assetPath, ".cs"));
-					if(string.Equals(normalized, beside, StringComparison.OrdinalIgnoreCase))
-						return true;
-				}
-
-				//And uNode records where it last generated this graph, wherever that was.
+				//uNode records where it last generated this graph, wherever that was.
 				var data = GenerationUtility.GetGraphData(graph);
 				if(data != null && !string.IsNullOrEmpty(data.path)) {
 					if(string.Equals(normalized, NormalizePath(data.path), StringComparison.OrdinalIgnoreCase))
 						return true;
+				}
+
+				//Another graph's recorded output may claim the same file (shared partial classes).
+				var byPath = GenerationUtility.GetData().GetGraphData(d =>
+					!string.IsNullOrEmpty(d.path) &&
+					string.Equals(NormalizePath(d.path), normalized, StringComparison.OrdinalIgnoreCase));
+				if(byPath != null)
+					return true;
+
+				//Beside-a-graph convention.
+				var scriptPath = Path.ChangeExtension(AssetDatabase.GetAssetPath(graph), ".cs");
+				if(System.IO.File.Exists(scriptPath)) {
+					if(Path.GetFullPath(scriptPath) == Path.GetFullPath(path)) {
+						return true;
+					}
 				}
 			}
 			catch(Exception) {
