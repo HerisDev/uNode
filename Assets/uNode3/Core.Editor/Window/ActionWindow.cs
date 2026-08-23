@@ -37,6 +37,10 @@ namespace MaxyGames.UNode.Editors {
 		/// </summary>
 		public object variable;
 		/// <summary>
+		/// The custom VisualElement
+		/// </summary>
+		public VisualElement customUI { get; private set; }
+		/// <summary>
 		/// Called in OnGUI in the Top.
 		/// </summary>
 		public ActionRef<object> onGUITop;
@@ -143,6 +147,7 @@ namespace MaxyGames.UNode.Editors {
 		public static T Show(Func<VisualElement> createUI) {
 			T window = Craete(false);
 			var element = createUI?.Invoke();
+			window.customUI = element;
 			if(element != null) {
 				window.rootVisualElement.Add(element);
 			}

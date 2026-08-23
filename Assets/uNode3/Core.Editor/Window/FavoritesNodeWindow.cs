@@ -1472,24 +1472,95 @@ namespace MaxyGames.UNode.Editors {
 				return;
 			}
 
-			ActionPopupWindow.Show(() => {
-				EditorGUILayout.LabelField("Members of " + GetDisplayName(e), EditorStyles.boldLabel);
-				EditorGUILayout.Space(4);
-				EditorGUILayout.BeginHorizontal();
-				if(GUILayout.Button("Select All")) {
-					foreach(var m in validMembers) SetMemberFavorite(e, m, true);
+			ActionPopupWindow.Show(() => BuildAddMembersUI(e, validMembers))
+				.ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
+		}
+
+		/// <summary>
+		/// Builds the VisualElement UI for the 'Members of' popup
+		/// (the window auto-sizes to this content via ActionPopupWindow).
+		/// </summary>
+		VisualElement BuildAddMembersUI(FavoritesDataAsset.Entry typeEntry, MemberInfo[] members) {
+			var root = new VisualElement();
+			root.style.paddingTop = 8;
+			root.style.paddingBottom = 8;
+			root.style.paddingLeft = 10;
+			root.style.paddingRight = 10;
+			root.focusable = true;
+			root.RegisterCallback<KeyDownEvent>(evt => {
+				if(evt.keyCode == KeyCode.Escape) {
+					ActionPopupWindow.CloseLast();
+					evt.StopPropagation();
 				}
-				if(GUILayout.Button("Deselect All")) {
-					foreach(var m in validMembers) SetMemberFavorite(e, m, false);
+			});
+
+			root.Add(new Label("Members of " + GetDisplayName(typeEntry)) {
+				style = { unityFontStyleAndWeight = FontStyle.Bold, marginBottom = 6 }
+			});
+
+			var toggles = new List<(Toggle toggle, MemberInfo member)>();
+			void RefreshToggles() {
+				foreach(var entry in toggles) {
+					entry.toggle.SetValueWithoutNotify(FindChildMemberEntry(typeEntry.id, entry.member) != null);
 				}
-				EditorGUILayout.EndHorizontal();
-				EditorGUILayout.Space(4);
-				foreach(var m in validMembers) {
-					bool current = FindChildMemberEntry(e.id, m) != null;
-					bool updated = EditorGUILayout.ToggleLeft(EditorReflectionUtility.GetPrettyMemberName(m), current);
-					if(updated != current) SetMemberFavorite(e, m, updated);
-				}
-			}).ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
+			}
+
+			// ── Toolbar: Select All / Deselect All / spacer / Close ──
+			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6 } };
+			Button CreateToolbarButton(string text, Action onClick) {
+				return new Button(onClick) { text = text };
+			}
+			toolbarRow.Add(CreateToolbarButton("Select All", () => {
+				foreach(var m in members) SetMemberFavorite(typeEntry, m, true);
+				RefreshToggles();
+			}));
+			toolbarRow.Add(CreateToolbarButton("Deselect All", () => {
+				foreach(var m in members) SetMemberFavorite(typeEntry, m, false);
+				RefreshToggles();
+			}));
+			var spacer = new VisualElement { style = { flexGrow = 1 } };
+			toolbarRow.Add(spacer);
+			toolbarRow.Add(CreateToolbarButton("Close", () => ActionPopupWindow.CloseLast()));
+			root.Add(toolbarRow);
+
+			// ── Member list ──
+			var scroll = new ScrollView(ScrollViewMode.Vertical) { style = { maxHeight = 360 } };
+			foreach(var m in members) {
+				bool current = FindChildMemberEntry(typeEntry.id, m) != null;
+				var row = new VisualElement {
+					style = {
+						flexDirection = FlexDirection.Row, alignItems = Align.Center,
+						marginTop = 1, marginBottom = 1
+					}
+				};
+				var toggle = new Toggle() { value = current };
+				MemberInfo captured = m;
+				toggle.RegisterValueChangedCallback(evt => SetMemberFavorite(typeEntry, captured, evt.newValue));
+				row.Add(toggle);
+
+				var icon = new Image { image = GetMemberKindIcon(m) };
+				icon.style.width = 16;
+				icon.style.height = 16;
+				icon.style.flexShrink = 0;
+				icon.style.marginRight = 4;
+				row.Add(icon);
+
+				var label = new Label(EditorReflectionUtility.GetRichMemberName(m)) { enableRichText = true };
+				row.Add(label);
+
+				scroll.Add(row);
+				toggles.Add((toggle, m));
+			}
+			root.Add(scroll);
+			return root;
+		}
+
+		/// <summary>Kind icon for a reflected member (method/property/field).</summary>
+		Texture GetMemberKindIcon(MemberInfo member) {
+			if(member is MethodInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.MethodIcon));
+			if(member is PropertyInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.PropertyIcon));
+			if(member is FieldInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.FieldIcon));
+			return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.ExtensionIcon));
 		}
 
 		void SetMemberFavorite(FavoritesDataAsset.Entry typeEntry, MemberInfo member, bool value) {

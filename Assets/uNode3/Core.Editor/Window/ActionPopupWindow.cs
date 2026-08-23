@@ -32,38 +32,68 @@ namespace MaxyGames.UNode.Editors {
 
 			Vector2 startPosition = position.position;
 			container.ExecuteAndScheduleAction(() => {
-				if(autoSize && layout != container.layout) {
-					if(startPosition == Vector2.zero) {
-						startPosition = position.position;
+				if(customUI == null) {
+					if(autoSize && layout != container.layout) {
+						if(startPosition == Vector2.zero) {
+							startPosition = position.position;
+						}
+						layout = container.layout;
+						if(float.IsNaN(layout.width) || float.IsNaN(layout.height)) {
+							return;
+						}
+						var pos = position;
+						pos.width = Mathf.Clamp(layout.width, 50, maxWidth);
+						pos.height = Mathf.Clamp(layout.height, 50, maxHeight) + 4;
+						if(pos.width > position.width || pos.height > position.height) {
+							pos.width = maxWidth;
+							pos.height = maxHeight;
+						}
+						position = pos;
+						pos.x = startPosition.x;
+						pos.y = startPosition.y;
+						this.ChangePosition(pos);
 					}
-					layout = container.layout;
-					if(float.IsNaN(layout.width) || float.IsNaN(layout.height)) {
-						return;
+					if(oldAutosize != autoSize) {
+						oldAutosize = autoSize;
+						if(autoSize) {
+							IStyle style = container.style;
+							style.position = new(StyleKeyword.Null);
+							style.left = new(StyleKeyword.Null);
+							style.top = new(StyleKeyword.Null);
+							style.right = new(StyleKeyword.Null);
+							style.bottom = new(StyleKeyword.Null);
+						}
+						else {
+							container.StretchToParentSize();
+						}
 					}
-					var pos = position;
-					pos.width = Mathf.Clamp(layout.width, 50, maxWidth);
-					pos.height = Mathf.Clamp(layout.height, 50, maxHeight) + 4;
-					if(pos.width > position.width || pos.height > position.height) {
-						pos.width = maxWidth;
-						pos.height = maxHeight;
-					}
-					position = pos;
-					pos.x = startPosition.x;
-					pos.y = startPosition.y;
-					this.ChangePosition(pos);
 				}
-				if(oldAutosize != autoSize) {
-					oldAutosize = autoSize;
-					if(autoSize) {
-						IStyle style = container.style;
-						style.position = new(StyleKeyword.Null);
-						style.left = new(StyleKeyword.Null);
-						style.top = new(StyleKeyword.Null);
-						style.right = new(StyleKeyword.Null);
-						style.bottom = new(StyleKeyword.Null);
-					}
-					else {
-						container.StretchToParentSize();
+
+				// ── VisualElement content auto-size ──
+				// Content added via Show(Func<VisualElement>) lives outside the IMGUI
+				// container, so measure it directly and resize to fit. Mirrors the
+				// IMGUI path above: same anchor, caps and ChangePosition semantics.
+				var contentUI = customUI;
+				if(autoSize && contentUI != null && contentUI.panel != null) {
+					if(autoSize && layout != contentUI.layout) {
+						if(startPosition == Vector2.zero) {
+							startPosition = position.position;
+						}
+						layout = contentUI.layout;
+						if(float.IsNaN(layout.width) || float.IsNaN(layout.height)) {
+							return;
+						}
+						var pos = position;
+						pos.width = Mathf.Clamp(layout.width, 50, maxWidth);
+						pos.height = Mathf.Clamp(layout.height, 50, maxHeight) + 4;
+						if(pos.width > position.width || pos.height > position.height) {
+							pos.width = maxWidth;
+							pos.height = maxHeight;
+						}
+						position = pos;
+						pos.x = startPosition.x;
+						pos.y = startPosition.y;
+						this.ChangePosition(pos);
 					}
 				}
 			}, 1);
