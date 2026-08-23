@@ -100,9 +100,9 @@ namespace MaxyGames.UNode {
 			constructors = Array.Empty<ConstructorInfo>();
 		}
 
-		List<FieldInfo> fields;
+		protected List<FieldInfo> fields;
 		Dictionary<int, RuntimeGraphField> m_runtimeFields = new Dictionary<int, RuntimeGraphField>();
-		private void BuildFields() {
+		protected virtual void BuildFields() {
 			var inheritMembers = BaseType != null ? BaseType.GetFields(MemberData.flags) : Array.Empty<FieldInfo>();
 			if(fields == null) {
 				List<FieldInfo> members = new List<FieldInfo>(inheritMembers);
@@ -131,12 +131,11 @@ namespace MaxyGames.UNode {
 				}
 				fields = members;
 			}
-			AppendExternalFields();
 		}
 
-		List<PropertyInfo> properties;
+		protected List<PropertyInfo> properties;
 		Dictionary<int, RuntimeGraphProperty> m_runtimeProperties = new Dictionary<int, RuntimeGraphProperty>();
-		private void BuildProperties() {
+		protected virtual void BuildProperties() {
 			var inheritMembers = BaseType != null ? BaseType.GetProperties(MemberData.flags) : Array.Empty<PropertyInfo>();
 			if(properties == null) {
 				List<PropertyInfo> members = new List<PropertyInfo>(inheritMembers);
@@ -167,12 +166,11 @@ namespace MaxyGames.UNode {
 				}
 				properties = members;
 			}
-			AppendExternalProperties();
 		}
 
-		List<MethodInfo> methods;
+		protected List<MethodInfo> methods;
 		Dictionary<int, RuntimeGraphMethod> m_runtimeMethods = new Dictionary<int, RuntimeGraphMethod>();
-		private void BuildMethods() {
+		protected virtual void BuildMethods() {
 			var inheritMembers = BaseType != null ? BaseType.GetMethods(MemberData.flags) : Array.Empty<MethodInfo>();
 			if(methods == null) {
 				List<MethodInfo> members = new List<MethodInfo>(inheritMembers);
@@ -203,7 +201,6 @@ namespace MaxyGames.UNode {
 				}
 				methods = members;
 			}
-			AppendExternalMethods();
 		}
 		#endregion
 
@@ -224,31 +221,13 @@ namespace MaxyGames.UNode {
 		/// </summary>
 		public Type OtherHalfType => PartialGraphMembers.GetOtherHalfType(target);
 
-		private void AppendExternalFields() {
-			PartialGraphMerge.AppendExternalFields(target, this, fields);
-		}
-
-		private void AppendExternalProperties() {
-			PartialGraphMerge.AppendExternalProperties(target, this, properties);
-		}
-
-		private void AppendExternalMethods() {
-			PartialGraphMerge.AppendExternalMethods(target, this, methods);
-		}
-
-		List<EventInfo> events;
-		private void BuildEvents() {
+		protected List<EventInfo> events;
+		protected virtual void BuildEvents() {
 			if(events == null) {
 				events = new List<EventInfo>();
 			}
 			else {
 				events.Clear();
-			}
-			var otherHalf = OtherHalfType;
-			if(otherHalf != null) {
-				foreach(var nativeEvent in otherHalf.GetEvents(MemberData.flags)) {
-					events.Add(new RuntimeGraphExternalEvent(this, nativeEvent));
-				}
 			}
 		}
 

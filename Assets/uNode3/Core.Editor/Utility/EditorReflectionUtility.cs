@@ -207,7 +207,11 @@ namespace MaxyGames.UNode.Editors {
 				BuildRuntimeTypes();
 			}
 			List<RuntimeType> result = null;
+			RuntimeType seen = null;
 			foreach(var type in m_allRuntimeTypes) {
+				//Every half resolves to the same combined instance, so one hit is enough.
+				if(seen != null && ReferenceEquals(type, seen))
+					continue;
 				var owner = PartialGraphMembers.GetOwnerAsset(type);
 				if(owner == null)
 					continue;
@@ -219,6 +223,7 @@ namespace MaxyGames.UNode.Editors {
 				if(!IsPartialGraph(type)) {
 					continue;
 				}
+				seen = type;
 				if(result == null) {
 					result = new List<RuntimeType>();
 				}
@@ -260,15 +265,21 @@ namespace MaxyGames.UNode.Editors {
 
 		/// <summary>
 		/// Update Runtime Types sub members eg: fields, properties, methods.
+		/// Every half of one partial class resolves to the same combined instance, so each
+		/// distinct type object is updated exactly once.
 		/// </summary>
 		public static void UpdateRuntimeTypes() {
 			if(_runtimeTypes == null) {
 				BuildRuntimeTypes();
 			}
 			var types = m_allRuntimeTypes;
+			RuntimeType lastUpdated = null;
 			foreach(var type in types) {
+				if(lastUpdated != null && ReferenceEquals(type, lastUpdated))
+					continue;
 				try {
 					type.Update();
+					lastUpdated = type;
 				}
 				catch(Exception ex) {
 					Debug.LogException(ex);

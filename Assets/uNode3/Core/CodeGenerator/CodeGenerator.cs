@@ -1852,27 +1852,14 @@ namespace MaxyGames {
 		}
 
 		/// <summary>
-		/// True when the runtime member is declared by the merged class of the graph currently
-		/// being generated: its own half or a sibling half of the same `partial` class.
-		/// Each half declares its own members and C# partial merging unifies them into one
+		/// True when the runtime member belongs to the combined partial class being generated:
+		/// every half declares its own members and C# partial merging unifies them into one
 		/// class, so such members are emitted as direct member accesses instead of going
-		/// through the IRuntimeClass variable bridge.
+		/// through the IRuntimeClass variable bridge. The combined type identifies itself
+		/// through <see cref="IPartialGraphType"/>, whose instances own all merged wrappers.
 		/// </summary>
 		private static bool IsMergedPartialMember(MemberInfo member) {
-			var owner = PartialGraphMembers.GetOwnerAsset(member.DeclaringType as RuntimeType);
-			if(owner == null || graph == null)
-				return false;
-			//Identity is compared by full class name: every half of one partial class shares it.
-			var fullName = graph.GetFullGraphName();
-			if(string.IsNullOrEmpty(fullName))
-				return false;
-			if(owner.GetFullGraphName() == fullName)
-				return true;
-			foreach(var sibling in PartialGraphMembers.GetSiblingReflectionTypes(graph as GraphAsset)) {
-				if(sibling != null && PartialGraphMembers.GetOwnerAsset(sibling)?.GetFullGraphName() == fullName)
-					return true;
-			}
-			return false;
+			return member.DeclaringType is IPartialGraphType;
 		}
 
 		private static string GenerateGetRuntimeVariable(RuntimeField field) {

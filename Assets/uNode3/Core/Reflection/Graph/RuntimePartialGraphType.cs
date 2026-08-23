@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Reflection;
 
 namespace MaxyGames.UNode {
 	/// <summary>
@@ -21,13 +23,39 @@ namespace MaxyGames.UNode {
 	/// It implements <see cref="INativeType"/> because a partial class always has a real CLR
 	/// presence: the merged generated class once produced, otherwise the compiled
 	/// hand-written half while only it exists.
-	/// Member merging itself is shared with the base families through
-	/// <see cref="PartialGraphMerge"/>, which the base Build methods already invoke.
+	/// The member builds below own the combining: base builds produce the owning half's
+	/// authored members only, then every other half is merged on top through
+	/// <see cref="PartialGraphMerge"/>.
 	/// </summary>
 	public class RuntimePartialGraphType : RuntimeGraphType, IPartialGraphType, INativeType {
 		public RuntimePartialGraphType(GraphAsset target) : base(target) { }
 
 		GraphAsset IPartialGraphType.ownerAsset => target;
+
+		protected override void BuildFields() {
+			base.BuildFields();
+			PartialGraphMerge.AppendExternalFields(target, this, fields);
+		}
+
+		protected override void BuildProperties() {
+			base.BuildProperties();
+			PartialGraphMerge.AppendExternalProperties(target, this, properties);
+		}
+
+		protected override void BuildMethods() {
+			base.BuildMethods();
+			PartialGraphMerge.AppendExternalMethods(target, this, methods);
+		}
+
+		protected override void BuildEvents() {
+			base.BuildEvents();
+			var otherHalf = OtherHalfType;
+			if(otherHalf != null) {
+				foreach(var nativeEvent in otherHalf.GetEvents(MemberData.flags)) {
+					events.Add(new RuntimeGraphExternalEvent(this, nativeEvent));
+				}
+			}
+		}
 
 		public override Type GetNativeType() {
 			//The merged generated class once produced, otherwise the compiled hand-written
