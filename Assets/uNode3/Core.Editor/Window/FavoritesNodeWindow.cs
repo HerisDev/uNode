@@ -431,7 +431,7 @@ namespace MaxyGames.UNode.Editors {
 					if(score < 0f) continue;
 					var entry = new FavoritesDataAsset.Entry {
 						kind = FavoriteKind.Member,
-						targetMember = MemberData.CreateFromMember(m),
+						rawMember = m,
 						isVirtual = true,
 						displayName = m.Name,
 						id = "[deep]:" + key,
@@ -746,7 +746,7 @@ namespace MaxyGames.UNode.Editors {
 					if(score < 0f) continue;
 					var entry = new FavoritesDataAsset.Entry {
 						kind = FavoriteKind.Member,
-						targetMember = MemberData.CreateFromMember(m),
+						rawMember = m,
 						isVirtual = true,
 						displayName = m.Name,
 						// AddResult dedupes via the resolved MemberInfo, so the id
@@ -1005,8 +1005,8 @@ namespace MaxyGames.UNode.Editors {
 
 		/// <summary>Plain (markup-free) row title, safe for highlight span math.</summary>
 		string GetPlainTitle(FavoritesDataAsset.Entry e) {
-			if(e.kind == FavoriteKind.Member && !isVirtualMember(e))
-				return e.memberName ?? "(missing)";
+			//if(e.kind == FavoriteKind.Member && !isVirtualMember(e))
+			//	return e.memberName ?? "(missing)";
 			try { return GetDisplayName(e); }
 			catch { return e.displayName ?? e.id; }
 		}
@@ -1055,7 +1055,7 @@ namespace MaxyGames.UNode.Editors {
 				case FavoriteKind.Namespace:
 					return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.NamespaceIcon));
 				case FavoriteKind.Member:
-					var member = e.targetMember?.GetMembers(false)?.LastOrDefault();
+					var member = FavoritesManager.GetEntryMember(e);
 					if(member is MethodInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.MethodIcon));
 					if(member is PropertyInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.PropertyIcon));
 					if(member is FieldInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.FieldIcon));
@@ -1476,7 +1476,7 @@ namespace MaxyGames.UNode.Editors {
 						evt.menu.AppendSeparator();
 						evt.menu.AppendAction("Remove", _ => SetTypeNameVisible(nsOwner, e.displayName, false));
 					}
-				} else if(e.kind == FavoriteKind.Member && e.targetMember != null) {
+				} else if(e.kind == FavoriteKind.Member && e.rawMember != null) {
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
 					// Removing a generated member persists it in the type's mode list.
 					var owner = ResolveOwningType(e);
@@ -2207,7 +2207,7 @@ namespace MaxyGames.UNode.Editors {
 				return;
 			// Virtual rows: types and deep-search members (with a valid target)
 			// can spawn nodes; other virtual rows are read-only.
-			if(de.isVirtualChild && !(kind == FavoriteKind.Type || (kind == FavoriteKind.Member && de.entry.targetMember != null)))
+			if(de.isVirtualChild && !(kind == FavoriteKind.Type || (kind == FavoriteKind.Member && de.entry.rawMember != null)))
 				return;
 			var graphEditor = uNodeEditor.window?.graphEditor;
 			if(graphEditor == null || graphEditor.graphData == null || !graphEditor.graphData.CanAddNode) {
@@ -2267,7 +2267,12 @@ namespace MaxyGames.UNode.Editors {
 				var type = ResolveEntryType(e);
 				if(type != null) NodeEditorUtility.AddNewNode<MultipurposeNode>(graphEditor.graphData, pos, n => { n.target = MemberData.CreateFromType(type); graphEditor.Refresh(); });
 			} else if(e.kind == FavoriteKind.Member) {
-				GraphEditor.CreateNodeProcessor(e.targetMember, graphEditor.graphData, pos);
+				var mi = FavoritesManager.GetEntryMember(e);
+				if(mi != null) {
+					// Wrap the raw MemberInfo into MemberData only at use time —
+					// open generics resolve fine in-memory for node creation.
+					GraphEditor.CreateNodeProcessor(MemberData.CreateFromMember(mi), graphEditor.graphData, pos);
+				}
 				graphEditor.Refresh();
 			}
 		}

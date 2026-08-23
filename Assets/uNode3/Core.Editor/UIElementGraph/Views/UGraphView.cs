@@ -340,7 +340,7 @@ namespace MaxyGames.UNode.Editors {
 				var args = member.GetGenericArguments();
 				TypeItem[] typeItems = new TypeItem[args.Length];
 				for(int i = 0; i < args.Length; i++) {
-					var fil = new FilterAttribute(args[i].BaseType);
+					var fil = new FilterAttribute(args[i].BaseType) { OnlyGetType = true };
 					fil.ToFilterGenericConstraints(args[i]);
 					typeItems[i] = new TypeItem(args[i].BaseType, fil);
 				}
@@ -350,12 +350,10 @@ namespace MaxyGames.UNode.Editors {
 						if(w != null) {
 							w.Close();
 						}
-						TypeBuilderWindow.Show(Rect.zero, graphData.currentCanvas, typeItems[0].filter, delegate (MemberData[] members) {
-							member = ReflectionUtils.MakeGenericMethod(member, members.Select(item => item.startType).ToArray());
-							DragHandleMember(member, position, screenPosition);
-						}, new TypeItem(m, typeItems[0].filter));
+						member = ReflectionUtils.MakeGenericMethod(member, m.startType);
+						DragHandleMember(member, position, screenPosition);
 					};
-					w = ItemSelector.ShowAsNew(null, typeItems[0].filter, action).ChangePosition(screenPosition.ToScreenPoint());
+					w = ItemSelector.ShowAsNew(graphData.currentCanvas, typeItems[0].filter, action).ChangePosition(screenPosition.ToScreenPoint());
 				}
 				else {
 					TypeBuilderWindow.Show(screenPosition, graphData.currentCanvas, new FilterAttribute() { OnlyGetType = true }, (members) => {
@@ -493,197 +491,197 @@ namespace MaxyGames.UNode.Editors {
 				else
 				#endregion
 
-				#region Visual Element
-				if(generic is VisualElement) {
-					//#region Variable
-					//if(generic is TreeViews.VariableView) {
-					//	var view = generic as TreeViews.VariableView;
-					//	var variable = view.variable;
-					//	var root = view.owner as uNodeRoot;
-					//	if(root != editorData.graph) {
-					//		if(uNodeEditorUtility.IsPrefab(root)) {
-					//			root = GraphUtility.GetTempGraphObject(root);
-					//			if(root == editorData.graph) {
-					//				variable = root.GetVariableData(variable.Name);
-					//			} else {
-					//				if(view.owner is IClassIdentifier) {
-					//					var runtimeType = ReflectionUtils.GetRuntimeType(view.owner as uNodeRoot);
-					//					var field = runtimeType.GetField(variable.Name);
-					//					if(field != null) {
-					//						DragHandleMember(field, mPos);
-					//					} else {
-					//						uNodeEditorUtility.DisplayErrorMessage();
-					//					}
-					//					return;
-					//				}
-					//				var type = uNodeEditorUtility.GetFullScriptName(view.owner as uNodeRoot).ToType(false);
-					//				if(type != null) {
-					//					var field = type.GetField(variable.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic);
-					//					if(field != null) {
-					//						if(field.IsPublic) {
-					//							DragHandleMember(field, mPos);
-					//						} else {
-					//							EditorUtility.DisplayDialog("Variable is Private", "Can't access the variable because the variable is not public.", "OK");
-					//						}
-					//						return;
-					//					}
-					//				}
-					//				EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
-					//				return;
-					//			}
-					//		} else
-					//			return;
-					//	}
-					//	if(variable != null && root != null) {
-					//		DragHandleVariable(root, variable, mPos);
-					//	}
-					//} else
-					//#endregion
+					#region Visual Element
+					if(generic is VisualElement) {
+						//#region Variable
+						//if(generic is TreeViews.VariableView) {
+						//	var view = generic as TreeViews.VariableView;
+						//	var variable = view.variable;
+						//	var root = view.owner as uNodeRoot;
+						//	if(root != editorData.graph) {
+						//		if(uNodeEditorUtility.IsPrefab(root)) {
+						//			root = GraphUtility.GetTempGraphObject(root);
+						//			if(root == editorData.graph) {
+						//				variable = root.GetVariableData(variable.Name);
+						//			} else {
+						//				if(view.owner is IClassIdentifier) {
+						//					var runtimeType = ReflectionUtils.GetRuntimeType(view.owner as uNodeRoot);
+						//					var field = runtimeType.GetField(variable.Name);
+						//					if(field != null) {
+						//						DragHandleMember(field, mPos);
+						//					} else {
+						//						uNodeEditorUtility.DisplayErrorMessage();
+						//					}
+						//					return;
+						//				}
+						//				var type = uNodeEditorUtility.GetFullScriptName(view.owner as uNodeRoot).ToType(false);
+						//				if(type != null) {
+						//					var field = type.GetField(variable.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic);
+						//					if(field != null) {
+						//						if(field.IsPublic) {
+						//							DragHandleMember(field, mPos);
+						//						} else {
+						//							EditorUtility.DisplayDialog("Variable is Private", "Can't access the variable because the variable is not public.", "OK");
+						//						}
+						//						return;
+						//					}
+						//				}
+						//				EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
+						//				return;
+						//			}
+						//		} else
+						//			return;
+						//	}
+						//	if(variable != null && root != null) {
+						//		DragHandleVariable(root, variable, mPos);
+						//	}
+						//} else
+						//#endregion
 
-					//#region Property
-					//if(generic is TreeViews.PropertyView) {
-					//	var view = generic as TreeViews.PropertyView;
-					//	var property = view.property;
-					//	var root = property.owner as uNodeRoot;
-					//	if(root != editorData.graph) {
-					//		if(uNodeEditorUtility.IsPrefab(root)) {
-					//			root = GraphUtility.GetTempGraphObject(root);
-					//			if(root == editorData.graph) {
-					//				property = root.GetPropertyData(property.Name);
-					//			} else {
-					//				if(property.owner is IClassIdentifier) {
-					//					var runtimeType = ReflectionUtils.GetRuntimeType(property.owner as uNodeRoot);
-					//					var member = runtimeType.GetProperty(property.Name);
-					//					if(member != null) {
-					//						DragHandleMember(member, mPos);
-					//					} else {
-					//						uNodeEditorUtility.DisplayErrorMessage();
-					//					}
-					//					return;
-					//				}
-					//				var type = uNodeEditorUtility.GetFullScriptName(property.owner).ToType(false);
-					//				if(type != null) {
-					//					var member = type.GetProperty(property.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic);
-					//					if(member != null) {
-					//						DragHandleMember(member, mPos);
-					//						return;
-					//					}
-					//				}
-					//				EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
-					//				return;
-					//			}
-					//		} else
-					//			return;
-					//	}
-					//	if(property != null && root != null) {
-					//		DragHandleProperty(property, mPos);
-					//	}
-					//} else
-					//#endregion
+						//#region Property
+						//if(generic is TreeViews.PropertyView) {
+						//	var view = generic as TreeViews.PropertyView;
+						//	var property = view.property;
+						//	var root = property.owner as uNodeRoot;
+						//	if(root != editorData.graph) {
+						//		if(uNodeEditorUtility.IsPrefab(root)) {
+						//			root = GraphUtility.GetTempGraphObject(root);
+						//			if(root == editorData.graph) {
+						//				property = root.GetPropertyData(property.Name);
+						//			} else {
+						//				if(property.owner is IClassIdentifier) {
+						//					var runtimeType = ReflectionUtils.GetRuntimeType(property.owner as uNodeRoot);
+						//					var member = runtimeType.GetProperty(property.Name);
+						//					if(member != null) {
+						//						DragHandleMember(member, mPos);
+						//					} else {
+						//						uNodeEditorUtility.DisplayErrorMessage();
+						//					}
+						//					return;
+						//				}
+						//				var type = uNodeEditorUtility.GetFullScriptName(property.owner).ToType(false);
+						//				if(type != null) {
+						//					var member = type.GetProperty(property.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic);
+						//					if(member != null) {
+						//						DragHandleMember(member, mPos);
+						//						return;
+						//					}
+						//				}
+						//				EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
+						//				return;
+						//			}
+						//		} else
+						//			return;
+						//	}
+						//	if(property != null && root != null) {
+						//		DragHandleProperty(property, mPos);
+						//	}
+						//} else
+						//#endregion
 
-					//#region Function
-					//if(generic is TreeViews.FunctionView) {
-					//	var view = generic as TreeViews.FunctionView;
-					//	var function = view.function;
-					//	var root = function.owner as uNodeRoot;
-					//	if(root != editorData.graph) {
-					//		if(uNodeEditorUtility.IsPrefab(root)) {
-					//			root = GraphUtility.GetTempGraphObject(root);
-					//			if(root == editorData.graph) {
-					//				function = root.GetFunction(function.Name, function.GenericParameters.Count, function.Parameters.Select(p => p.Type).ToArray());
-					//			} else {
-					//				if(function.owner is IClassIdentifier) {
-					//					var runtimeType = ReflectionUtils.GetRuntimeType(function.owner as uNodeRoot);
-					//					var member = runtimeType.GetMethod(function.Name, function.Parameters.Select(p => p.Type).ToArray());
-					//					if(member != null) {
-					//						DragHandleMember(member, mPos);
-					//					} else {
-					//						uNodeEditorUtility.DisplayErrorMessage();
-					//					}
-					//					return;
-					//				}
-					//				var type = uNodeEditorUtility.GetFullScriptName(function.owner).ToType(false);
-					//				if(type != null) {
-					//					var member = type.GetMethod(function.Name, function.Parameters.Select(p => p.Type).ToArray());
-					//					if(member != null) {
-					//						if(member.IsPublic) {
-					//							DragHandleMember(member, mPos, topMPos);
-					//						} else {
-					//							EditorUtility.DisplayDialog("Function is Private", "Can't access the function because the function is not public.", "OK");
-					//						}
-					//						return;
-					//					}
-					//				}
-					//				EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
-					//				return;
-					//			}
-					//		} else
-					//			return;
-					//	}
-					//	if(function != null && root != null) {
-					//		DragHandleFunction(function, mPos);
-					//	}
-					//} else
-					//#endregion
+						//#region Function
+						//if(generic is TreeViews.FunctionView) {
+						//	var view = generic as TreeViews.FunctionView;
+						//	var function = view.function;
+						//	var root = function.owner as uNodeRoot;
+						//	if(root != editorData.graph) {
+						//		if(uNodeEditorUtility.IsPrefab(root)) {
+						//			root = GraphUtility.GetTempGraphObject(root);
+						//			if(root == editorData.graph) {
+						//				function = root.GetFunction(function.Name, function.GenericParameters.Count, function.Parameters.Select(p => p.Type).ToArray());
+						//			} else {
+						//				if(function.owner is IClassIdentifier) {
+						//					var runtimeType = ReflectionUtils.GetRuntimeType(function.owner as uNodeRoot);
+						//					var member = runtimeType.GetMethod(function.Name, function.Parameters.Select(p => p.Type).ToArray());
+						//					if(member != null) {
+						//						DragHandleMember(member, mPos);
+						//					} else {
+						//						uNodeEditorUtility.DisplayErrorMessage();
+						//					}
+						//					return;
+						//				}
+						//				var type = uNodeEditorUtility.GetFullScriptName(function.owner).ToType(false);
+						//				if(type != null) {
+						//					var member = type.GetMethod(function.Name, function.Parameters.Select(p => p.Type).ToArray());
+						//					if(member != null) {
+						//						if(member.IsPublic) {
+						//							DragHandleMember(member, mPos, topMPos);
+						//						} else {
+						//							EditorUtility.DisplayDialog("Function is Private", "Can't access the function because the function is not public.", "OK");
+						//						}
+						//						return;
+						//					}
+						//				}
+						//				EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
+						//				return;
+						//			}
+						//		} else
+						//			return;
+						//	}
+						//	if(function != null && root != null) {
+						//		DragHandleFunction(function, mPos);
+						//	}
+						//} else
+						//#endregion
 
-					//#region Graph & Macro
-					//if(generic is TreeViews.GraphTreeView) {
-					//	var view = generic as TreeViews.GraphTreeView;
-					//	var root = view.root;
-					//	if(root != editorData.graph) {
-					//		if(uNodeEditorUtility.IsPrefab(root)) {
-					//			if(root is uNodeMacro) {
-					//				CreateLinkedMacro(root as uNodeMacro, mPos);
-					//				return;
-					//			}
-					//			root = GraphUtility.GetTempGraphObject(root);
-					//			if(root == editorData.graph) {
-					//				NodeEditorUtility.AddNewNode(editorData, "this", null, mPos, delegate (MultipurposeNode n) {
-					//					n.target.target = new MemberData(root, MemberData.TargetType.SelfTarget);
-					//					MemberDataUtility.UpdateMultipurposeMember(n.target);
-					//				});
-					//				graph.Refresh();
-					//			} else {
-					//				if(root is IClassIdentifier) {
-					//					EditorUtility.DisplayDialog("Error", "Unsupported graph type.", "OK");
-					//					return;
-					//				}
-					//				var type = uNodeEditorUtility.GetFullScriptName(root).ToType(false);
-					//				if(type != null) {
-					//					DragHandleMember(type, mPos);
-					//				} else {
-					//					EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
-					//				}
-					//				return;
-					//			}
-					//		} else
-					//			return;
-					//	}
-					//}
-					//#endregion
-				}
-				else
-				#endregion
+						//#region Graph & Macro
+						//if(generic is TreeViews.GraphTreeView) {
+						//	var view = generic as TreeViews.GraphTreeView;
+						//	var root = view.root;
+						//	if(root != editorData.graph) {
+						//		if(uNodeEditorUtility.IsPrefab(root)) {
+						//			if(root is uNodeMacro) {
+						//				CreateLinkedMacro(root as uNodeMacro, mPos);
+						//				return;
+						//			}
+						//			root = GraphUtility.GetTempGraphObject(root);
+						//			if(root == editorData.graph) {
+						//				NodeEditorUtility.AddNewNode(editorData, "this", null, mPos, delegate (MultipurposeNode n) {
+						//					n.target.target = new MemberData(root, MemberData.TargetType.SelfTarget);
+						//					MemberDataUtility.UpdateMultipurposeMember(n.target);
+						//				});
+						//				graph.Refresh();
+						//			} else {
+						//				if(root is IClassIdentifier) {
+						//					EditorUtility.DisplayDialog("Error", "Unsupported graph type.", "OK");
+						//					return;
+						//				}
+						//				var type = uNodeEditorUtility.GetFullScriptName(root).ToType(false);
+						//				if(type != null) {
+						//					DragHandleMember(type, mPos);
+						//				} else {
+						//					EditorUtility.DisplayDialog("Type not found", "You need to compile graph to script in order to use it on another graph.", "OK");
+						//				}
+						//				return;
+						//			}
+						//		} else
+						//			return;
+						//	}
+						//}
+						//#endregion
+					}
+					else
+					#endregion
 
-				#region MemberInfo
-				if(generic is MemberInfo) {
-					if(generic is Type) {
-						DragHandleMember(generic as Type, mPos);
-					}
-					else if(generic is FieldInfo) {
-						DragHandleMember(generic as FieldInfo, mPos);
-					}
-					else if(generic is PropertyInfo) {
-						DragHandleMember(generic as PropertyInfo, mPos);
-					}
-					else if(generic is MethodInfo) {
-						DragHandleMember(generic as MethodInfo, mPos, topMPos);
-					}
-					else if(generic is ConstructorInfo) {
-						DragHandleMember(generic as ConstructorInfo, mPos);
-					}
-				}
-				#endregion
+						#region MemberInfo
+						if(generic is MemberInfo) {
+							if(generic is Type) {
+								DragHandleMember(generic as Type, mPos);
+							}
+							else if(generic is FieldInfo) {
+								DragHandleMember(generic as FieldInfo, mPos);
+							}
+							else if(generic is PropertyInfo) {
+								DragHandleMember(generic as PropertyInfo, mPos);
+							}
+							else if(generic is MethodInfo) {
+								DragHandleMember(generic as MethodInfo, mPos, topMPos);
+							}
+							else if(generic is ConstructorInfo) {
+								DragHandleMember(generic as ConstructorInfo, mPos);
+							}
+						}
+						#endregion
 
 				#region Menu
 				if(generic is NodeMenu) {
@@ -1316,7 +1314,7 @@ namespace MaxyGames.UNode.Editors {
 					evt.menu.AppendAction("Delete", null, DropdownMenuAction.AlwaysDisabled);
 				}
 			}
-#endregion
+			#endregion
 
 			#region Node
 			if(evt.target is UNodeView) {
@@ -2512,7 +2510,7 @@ namespace MaxyGames.UNode.Editors {
 			});
 			return contentRect;
 		}
-#endregion
+		#endregion
 	}
 
 	#region Classes

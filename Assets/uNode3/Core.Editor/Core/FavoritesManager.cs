@@ -38,7 +38,8 @@ namespace MaxyGames.UNode.Editors {
 	/// ScriptableSingleton container for all favorites data.
 	/// Persisted automatically by Unity inside Library/ScriptableSingletons
 	/// (outside the Assets folder) using Unity's native serializer so that
-	/// MemberData / SerializedType round-trip correctly.
+	/// SerializedType references round-trip correctly. Members are not
+	/// persisted — they are generated from their type items via reflection.
 	[FilePath(uNodePreference.preferenceDirectory + "/Favorites.asset", FilePathAttribute.Location.ProjectFolder)]
 	/// </summary>
 	public class FavoritesDataAsset : ScriptableSingleton<FavoritesDataAsset> {
@@ -73,10 +74,13 @@ namespace MaxyGames.UNode.Editors {
 			public SerializedType targetType;
 
 			/// <summary>
-			/// The targeted member. Used for the Member kind,
-			/// its declaring type defines the group it belongs to.
+			/// Runtime-only reflected member for virtual Member entries.
+			/// Never serialized — members are generated from their type item,
+			/// so raw reflection replaces the old MemberData field entirely
+			/// (open generics like GetComponent&lt;T&gt;() stay intact).
 			/// </summary>
-			public MemberData targetMember;
+			[System.NonSerialized]
+			public MemberInfo rawMember;
 
 			/// <summary>
 			/// The node menu name, used for creating Node kind items on the graph.
@@ -104,8 +108,8 @@ namespace MaxyGames.UNode.Editors {
 					if(isVirtual) return null;
 					if(targetType != null && targetType.isAssigned)
 						return targetType.type;
-					if(targetMember != null)
-						return targetMember.startType;
+					if(rawMember != null)
+						return rawMember is Type rt ? rt : rawMember.DeclaringType;
 					return null;
 				}
 			}
@@ -125,14 +129,9 @@ namespace MaxyGames.UNode.Editors {
 			/// </summary>
 			public string memberName {
 				get {
-					if(kind != FavoriteKind.Member || targetMember == null)
+					if(kind != FavoriteKind.Member)
 						return null;
-					if(!string.IsNullOrEmpty(targetMember.name))
-						return targetMember.name;
-					var members = targetMember.GetMembers(false);
-					if(members != null && members.Length > 0)
-						return members[members.Length - 1].Name;
-					return null;
+					return rawMember?.Name;
 				}
 			}
 
@@ -140,7 +139,7 @@ namespace MaxyGames.UNode.Editors {
 				get {
 					switch(kind) {
 						case FavoriteKind.Member:
-							return targetMember != null && !string.IsNullOrEmpty(memberName);
+							return rawMember != null && !string.IsNullOrEmpty(memberName);
 						case FavoriteKind.Folder:
 						case FavoriteKind.Namespace:
 							return !string.IsNullOrEmpty(displayName);
@@ -289,19 +288,13 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
-		/// Resolve the reflected MemberInfo targeted by a member entry
-		/// (the last element of its MemberData chain).
+		/// Resolve the reflected MemberInfo of a member entry. Virtual entries
+		/// carry the raw MemberInfo directly (open generics stay intact).
 		/// </summary>
 		public static MemberInfo GetEntryMember(FavoritesDataAsset.Entry entry) {
-			if(entry == null || entry.kind != FavoriteKind.Member || entry.targetMember == null)
+			if(entry == null || entry.kind != FavoriteKind.Member)
 				return null;
-			try {
-				var members = entry.targetMember.GetMembers(false);
-				if(members != null && members.Length > 0)
-					return members[members.Length - 1];
-			}
-			catch { }
-			return null;
+			return entry.rawMember;
 		}
 
 		public static void RemoveEntry(string entryID) {
@@ -600,7 +593,7 @@ namespace MaxyGames.UNode.Editors {
 				result.Add(new FavoritesDataAsset.Entry {
 					id = "[member]:" + declName + "::" + m.Name + "::" + m.MetadataToken,
 					kind = FavoriteKind.Member,
-					targetMember = MemberData.CreateFromMember(m),
+					rawMember = m,
 					isVirtual = true,
 					displayName = m.Name,
 					parentID = "[type]:" + typeEntry.id,
