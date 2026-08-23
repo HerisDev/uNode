@@ -182,6 +182,7 @@ namespace MaxyGames.UNode.Editors {
 
 		#region Persistence
 		static FavoritesManager() {
+			MigrateLegacyMembers();
 			EnsureDefaultCategory();
 		}
 
@@ -197,6 +198,16 @@ namespace MaxyGames.UNode.Editors {
 					orderIndex = 0,
 				});
 			}
+		}
+
+		/// <summary>
+		/// One-time cleanup: members are no longer persisted — they are generated
+		/// from their type item and hidden via the entry's excludedMembers list.
+		/// </summary>
+		static void MigrateLegacyMembers() {
+			int removed = asset.entries.RemoveAll(e => e.kind == FavoriteKind.Member);
+			if(removed > 0)
+				Save();
 		}
 		#endregion
 
@@ -245,28 +256,18 @@ namespace MaxyGames.UNode.Editors {
 
 		#region Entries
 		/// <summary>
-		/// Add an entry to the asset. Returns false and changes nothing when
-		/// the entry is a duplicate member inside its type item.
+		/// Add an entry to the asset. Member entries are never persisted —
+		/// members are generated from their type item.
 		/// </summary>
-		public static bool AddEntry(string categoryID, FavoritesDataAsset.Entry entry) {
+		public static void AddEntry(string categoryID, FavoritesDataAsset.Entry entry) {
 			if(entry.parentID == null)
 				entry.parentID = string.Empty;
-			// Disallow duplicated members inside the same type item.
-			if(entry.kind == FavoriteKind.Member) {
-				var memberInfo = GetEntryMember(entry);
-				bool duplicate = memberInfo != null
-					? HasMember(categoryID, entry.parentID, memberInfo)
-					: HasMemberByName(categoryID, entry.parentID, entry.memberName); // fallback when reflection fails
-				if(duplicate)
-					return false;
-			}
 			entry.categoryID = categoryID;
 			entry.id = Guid.NewGuid().ToString();
 			entry.orderIndex = NextOrderIndex(categoryID, entry.parentID);
 			asset.entries.Add(entry);
 			Save();
 			RaiseChanged();
-			return true;
 		}
 
 		/// <summary>
@@ -283,31 +284,6 @@ namespace MaxyGames.UNode.Editors {
 			}
 			catch { }
 			return null;
-		}
-
-		/// <summary>
-		/// True when an equivalent member already exists under the same parent.
-		/// Compares MemberInfo directly (reflection caches instances per member).
-		/// </summary>
-		public static bool HasMember(string categoryID, string parentID, MemberInfo member) {
-			if(member == null)
-				return false;
-			return asset.entries.Any(e =>
-				e.categoryID == categoryID &&
-				e.kind == FavoriteKind.Member &&
-				e.parentID == parentID &&
-				GetEntryMember(e) == member);
-		}
-
-		/// <summary>Name-only fallback used when reflection resolution fails.</summary>
-		public static bool HasMemberByName(string categoryID, string parentID, string memberName) {
-			if(string.IsNullOrEmpty(memberName))
-				return false;
-			return asset.entries.Any(e =>
-				e.categoryID == categoryID &&
-				e.kind == FavoriteKind.Member &&
-				e.parentID == parentID &&
-				e.memberName == memberName);
 		}
 
 		public static void RemoveEntry(string entryID) {
@@ -520,6 +496,46 @@ namespace MaxyGames.UNode.Editors {
 				}
 			}
 			result.Sort((a, b) => string.Compare(a.targetType.type.FullName, b.targetType.type.FullName, StringComparison.OrdinalIgnoreCase));
+			return result;
+		}
+
+		/// <summary>
+		/// Read-only: generate virtual member entries for the given type item.
+		/// Members are never persisted — they are bound to their type and hidden
+		/// by adding their name to the entry's excludedMembers list.
+		/// </summary>
+		public static List<FavoritesDataAsset.Entry> GetVirtualTypeMembers(FavoritesDataAsset.Entry typeEntry) {
+			var result = new List<FavoritesDataAsset.Entry>();
+			if(typeEntry == null || typeEntry.kind != FavoriteKind.Type || typeEntry.isVirtual)
+				return result;
+			Type type = null;
+			try { type = typeEntry.resolvedType; } catch { }
+			if(type == null || type.IsEnum)
+				return result;
+			MemberInfo[] members;
+			try {
+				members = type.GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+			}
+			catch {
+				return result;
+			}
+			string declName = type.FullName ?? type.Name;
+			foreach(var m in members) {
+				if(m is EventInfo) continue;
+				if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+				// Hidden via the persisted exclusion list.
+				if(typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(m.Name))
+					continue;
+				result.Add(new FavoritesDataAsset.Entry {
+					id = "[member]:" + declName + "::" + m.Name + "::" + m.MetadataToken,
+					kind = FavoriteKind.Member,
+					targetMember = MemberData.CreateFromMember(m),
+					isVirtual = true,
+					displayName = m.Name,
+					parentID = "[type]:" + typeEntry.id,
+				});
+			}
+			result.Sort((a, b) => string.Compare(a.memberName, b.memberName, StringComparison.OrdinalIgnoreCase));
 			return result;
 		}
 		#endregion
