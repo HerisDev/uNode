@@ -409,6 +409,7 @@ namespace MaxyGames.UNode.Editors {
 				foreach(var m in members) {
 					if(m is EventInfo) continue;
 					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+					if(FavoritesManager.IsAccessorMethod(m)) continue;
 					// Respect the owner type's IncludeAll/ExcludeAll visibility.
 					if(!FavoritesManager.IsMemberVisibleIn(ownerType, m))
 						continue;
@@ -737,6 +738,7 @@ namespace MaxyGames.UNode.Editors {
 					token.ThrowIfCancellationRequested();
 					if(m is EventInfo) continue;
 					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+					if(FavoritesManager.IsAccessorMethod(m)) continue;
 					// Respect the owner type's IncludeAll/ExcludeAll visibility.
 					if(!FavoritesManager.IsMemberVisibleIn(ownerType, m))
 						continue;

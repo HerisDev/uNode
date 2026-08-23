@@ -548,6 +548,16 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
+		/// True for compiler-generated property accessors (get_/set_) which are
+		/// hidden from generated member lists.
+		/// </summary>
+		public static bool IsAccessorMethod(MemberInfo member) {
+			return member is MethodInfo method &&
+				(method.Name.StartsWith("get_", StringComparison.Ordinal) ||
+				 method.Name.StartsWith("set_", StringComparison.Ordinal));
+		}
+
+		/// <summary>
 		/// Mode-aware visibility of a reflected member under a type favorite.
 		/// IncludeAll → visible unless listed; ExcludeAll → visible only when
 		/// listed. A null owner (e.g. namespace virtual types) is always visible.
@@ -584,6 +594,7 @@ namespace MaxyGames.UNode.Editors {
 			foreach(var m in members) {
 				if(m is EventInfo) continue;
 				if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+				if(IsAccessorMethod(m)) continue;
 				if(!IsMemberVisibleIn(typeEntry, m))
 					continue;
 				result.Add(new FavoritesDataAsset.Entry {
