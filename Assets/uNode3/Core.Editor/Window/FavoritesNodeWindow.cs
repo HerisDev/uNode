@@ -1046,8 +1046,7 @@ namespace MaxyGames.UNode.Editors {
 			return sb.ToString();
 		}
 
-		Texture GetIcon(FavoritesDataAsset.Entry e) {			// Resolve the type so virtual namespace-type rows get a real type icon
-			// (resolvedType returns null for isVirtual entries).
+		Texture GetIcon(FavoritesDataAsset.Entry e) {
 			Type iconType = ResolveEntryType(e);
 
 			switch(e.kind) {
@@ -1056,7 +1055,6 @@ namespace MaxyGames.UNode.Editors {
 				case FavoriteKind.Namespace:
 					return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.NamespaceIcon));
 				case FavoriteKind.Member:
-					if(e.isVirtual) goto default;
 					var member = e.targetMember?.GetMembers(false)?.LastOrDefault();
 					if(member is MethodInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.MethodIcon));
 					if(member is PropertyInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.PropertyIcon));
