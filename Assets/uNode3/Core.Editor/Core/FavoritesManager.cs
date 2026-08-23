@@ -209,12 +209,49 @@ namespace MaxyGames.UNode.Editors {
 
 		static void EnsureDefaultCategory() {
 			if(asset.categories.Count == 0) {
-				asset.categories.Add(new FavoritesDataAsset.Category {
+				var general = new FavoritesDataAsset.Category {
 					id = Guid.NewGuid().ToString(),
 					name = "General",
 					orderIndex = 0,
+				};
+				asset.categories.Add(general);
+				// First run: pre-populate General with commonly used namespaces.
+				SeedDefaultNamespaces(general.id);
+			}
+		}
+
+		/// <summary>
+		/// Pre-populates a freshly created category with commonly used namespaces,
+		/// mirroring uNode's default favorite namespaces plus a few essentials.
+		/// </summary>
+		static void SeedDefaultNamespaces(string categoryID) {
+			string[] defaultNamespaces = {
+				"System",
+				"System.Collections",
+				"System.Collections.Generic",
+				"UnityEngine",
+				"UnityEngine.AI",
+				"UnityEngine.Events",
+				"UnityEngine.EventSystems",
+				"UnityEngine.SceneManagement",
+				"UnityEngine.UI",
+				"UnityEngine.UIElements",
+			};
+			int orderIndex = 0;
+			foreach(var ns in defaultNamespaces) {
+				if(asset.entries.Any(e => e.categoryID == categoryID &&
+					e.kind == FavoriteKind.Namespace && e.displayName == ns))
+					continue;
+				asset.entries.Add(new FavoritesDataAsset.Entry {
+					id = Guid.NewGuid().ToString(),
+					kind = FavoriteKind.Namespace,
+					categoryID = categoryID,
+					displayName = ns,
+					parentID = string.Empty,
+					orderIndex = orderIndex++,
 				});
 			}
+			Save();
 		}
 
 		/// <summary>
