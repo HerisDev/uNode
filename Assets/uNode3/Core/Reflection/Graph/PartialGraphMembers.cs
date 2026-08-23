@@ -74,10 +74,9 @@ namespace MaxyGames.UNode {
 	/// <summary>
 	/// The seam between the runtime reflection types (this assembly) and the other half of a
 	/// `partial` graph. Two views are available: <see cref="Get"/> for the syntax-scanned
-	/// member descriptions, and <see cref="GetOtherHalfType"/> for the real compiled CLR type
-	/// of the hand-written half, which is what the merged graph type reflects over.
-	/// The editor installs both providers on load; in a build they stay null and the type is
-	/// resolved by full name instead, because the hand-written script compiles with the project.
+	/// member descriptions (editor-provided), and <see cref="GetOtherHalfType"/> for the real
+	/// compiled CLR type behind the class, resolved by full name right here so editor and
+	/// builds behave identically.
 	/// </summary>
 	public static class PartialGraphMembers {
 		private static readonly PartialMemberInfo[] none = Array.Empty<PartialMemberInfo>();
@@ -87,12 +86,6 @@ namespace MaxyGames.UNode {
 		/// half of the given graph, or null when the graph is not partial.
 		/// </summary>
 		public static Func<GraphAsset, IList<PartialMemberInfo>> provider;
-
-		/// <summary>
-		/// Installed by the editor. Returns the compiled CLR type of the hand-written half,
-		/// or null when the graph has no other half (which is not an error).
-		/// </summary>
-		public static Func<GraphAsset, Type> typeProvider;
 
 		/// <summary>
 		/// Installed by the editor. Returns every other reflection type sharing this graph's
@@ -157,18 +150,23 @@ namespace MaxyGames.UNode {
 		}
 
 		/// <summary>
-		/// The real CLR type behind the hand-written half of a `partial` graph, or null when
-		/// the graph has none. A null result is normal: being `partial` no longer requires a
-		/// second declaration to exist anywhere.
+		/// Memoises full-name resolutions. A domain reload clears it, which is exactly when
+		/// assemblies change; renames mid-session simply orphan the old key.
+		/// </summary>
+		private static readonly Dictionary<string, Type> s_halfTypeCache = new Dictionary<string, Type>();
+
+		/// <summary>
+		/// The real CLR type behind a `partial` graph class, or null when nothing compiled
+		/// carries that name yet (a normal state: being `partial` requires no other half).
+		/// Resolution is by full name only, identical in editor and builds: the hand-written
+		/// half and the generated merged class both compile with the project, so whichever
+		/// exists is reachable through plain reflection. A resolved uNode runtime wrapper is
+		/// rejected, since that would be another graph's type rather than a hand-written one.
 		/// </summary>
 		public static Type GetOtherHalfType(GraphAsset graph) {
 			if(graph == null)
 				return null;
 			try {
-				if(typeProvider != null)
-					return typeProvider(graph);
-				//In a build there is no source scanner, but the hand-written script compiled
-				//with the project, so the class is reachable by its generated full name.
 				var modifier = graph as IClassModifier;
 				if(modifier == null || modifier.GetModifier()?.Partial == false)
 					return null;
@@ -176,7 +174,18 @@ namespace MaxyGames.UNode {
 				if(string.IsNullOrEmpty(name))
 					return null;
 				var ns = graph.GetGraphNamespace() ?? string.Empty;
-				return (string.IsNullOrEmpty(ns) ? name : ns + "." + name).ToType(false);
+				var fullName = string.IsNullOrEmpty(ns) ? name : ns + "." + name;
+				if(s_halfTypeCache.TryGetValue(fullName, out var cached)) {
+					return cached;
+				}
+				var compiled = fullName.ToType(false);
+				//uNode runtime wrappers are never a hand-written half; they would only appear
+				//here if the name collided with a graph type, which must not be merged.
+				if(compiled is RuntimeType) {
+					compiled = null;
+				}
+				s_halfTypeCache[fullName] = compiled;
+				return compiled;
 			}
 			catch(Exception ex) {
 				UnityEngine.Debug.LogException(ex);
