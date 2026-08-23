@@ -1069,6 +1069,13 @@ namespace MaxyGames.UNode.Editors {
 						stream.Close();
 					}
 				}
+				//Record the manual output location 
+				if(!string.IsNullOrEmpty(path)) {
+					var cachedData = GetData().GetGraphData(graphObject);
+					cachedData.path = path;
+					cachedData.generatedScript = generatedScript;
+					SaveData();
+				}
 				if(uNodePreference.preferenceData.IsAutoRefreshEnabled) {
 					AssetDatabase.Refresh();
 				}

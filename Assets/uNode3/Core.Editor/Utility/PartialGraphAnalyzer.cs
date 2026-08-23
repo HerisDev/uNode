@@ -74,9 +74,25 @@ namespace MaxyGames.UNode.Editors.Analyzer {
 		/// <summary>
 		/// Compares graph-authored members against the real compiled members of the other half,
 		/// which is exact: every kind, visibility, overload and event is visible.
+		/// Authored sets cover every graph half of the class, not just this one.
+		/// When the compiled class originates from generation - this half or a sibling emitted
+		/// its C# - authored members exist in it legitimately and overlaps are skipped; only
+		/// genuinely foreign hand-written declarations are reported. Without generation the
+		/// class is purely hand-written, so any overlap with an authored member is a real
+		/// duplicate exactly as before.
 		/// </summary>
 		private void CheckCollisionsWithNative(
 			ErrorAnalyzer analyzer, UGraphElement graphData, GraphAsset asset, Type otherHalf, string fullName) {
+			bool generated = HasGeneratedOutput(asset);
+			if(!generated) {
+				foreach(var sibling in PartialGraphMembers.GetSiblingReflectionTypes(asset)) {
+					var siblingOwner = PartialGraphMembers.GetOwnerAsset(sibling);
+					if(siblingOwner != null && HasGeneratedOutput(siblingOwner)) {
+						generated = true;
+						break;
+					}
+				}
+			}
 			//Name-keyed map covering all single-member kinds; any overlap between kinds is
 			//as much a duplicate as two fields of one name.
 			var declared = new Dictionary<string, string>();
@@ -88,40 +104,66 @@ namespace MaxyGames.UNode.Editors.Analyzer {
 					declared[property.name] = "property";
 				}
 			}
+			//Functions are matched on their full signature so overloads stay legal.
+			var functionSignatures = new HashSet<string>();
+			foreach(var function in asset.GetFunctions()) {
+				functionSignatures.Add(MakeSignature(function.name, function.Parameters.Select(p => p.Type)));
+				if(!declared.ContainsKey(function.name)) {
+					declared[function.name] = "function";
+				}
+			}
+			foreach(var sibling in PartialGraphMembers.GetSiblingReflectionTypes(asset)) {
+				var owner = PartialGraphMembers.GetOwnerAsset(sibling);
+				if(owner == null)
+					continue;
+				foreach(var variable in owner.GetVariables()) {
+					if(!declared.ContainsKey(variable.name)) {
+						declared[variable.name] = "variable";
+					}
+				}
+				foreach(var property in owner.GetProperties()) {
+					if(!declared.ContainsKey(property.name)) {
+						declared[property.name] = "property";
+					}
+				}
+				foreach(var function in owner.GetFunctions()) {
+					functionSignatures.Add(MakeSignature(function.name, function.Parameters.Select(p => p.Type)));
+					if(!declared.ContainsKey(function.name)) {
+						declared[function.name] = "function";
+					}
+				}
+			}
+			//Overlaps with authored members are duplicates only when the compiled class is
+			//purely hand-written; once any half generated its output they are legitimate.
 			foreach(var nativeField in otherHalf.GetFields(MemberData.flags)) {
 				if(IsCompilerGenerated(nativeField.Name))
 					continue;
 				if(declared.TryGetValue(nativeField.Name, out var kind)) {
+					if(generated)
+						continue;
 					RegisterDuplicate(analyzer, graphData, fullName, nativeField.Name, "field", nativeField.DeclaringType, kind);
 				}
 			}
 			foreach(var nativeProperty in otherHalf.GetProperties(MemberData.flags)) {
 				if(declared.TryGetValue(nativeProperty.Name, out var kind)) {
+					if(generated)
+						continue;
 					RegisterDuplicate(analyzer, graphData, fullName, nativeProperty.Name, "property", nativeProperty.DeclaringType, kind);
 				}
 			}
 			foreach(var nativeEvent in otherHalf.GetEvents(MemberData.flags)) {
 				if(declared.TryGetValue(nativeEvent.Name, out var kind)) {
+					if(generated)
+						continue;
 					RegisterDuplicate(analyzer, graphData, fullName, nativeEvent.Name, "event", nativeEvent.DeclaringType, kind);
-				}
-			}
-			//Functions are matched on their full signature so overloads stay legal.
-			var functions = new Dictionary<string, Function>();
-			foreach(var function in asset.GetFunctions()) {
-				var key = MakeSignature(function.name, function.Parameters.Select(p => p.Type));
-				functions[key] = function;
-				if(!declared.ContainsKey(function.name)) {
-					declared[function.name] = "function";
 				}
 			}
 			foreach(var nativeMethod in otherHalf.GetMethods(MemberData.flags)) {
 				if(nativeMethod.IsSpecialName)
 					continue;
 				var key = MakeSignature(nativeMethod.Name, nativeMethod.GetParameters().Select(p => p.ParameterType));
-				if(functions.TryGetValue(key, out var function)) {
-					//A bodyless `partial` function in the graph is a declaration waiting for
-					//this exact implementation, not a duplicate.
-					if(function.modifier != null && function.modifier.Partial)
+				if(functionSignatures.Contains(key)) {
+					if(generated)
 						continue;
 					RegisterDuplicate(analyzer, graphData, fullName, nativeMethod.Name, "method", nativeMethod.DeclaringType, "function");
 					continue;
@@ -131,6 +173,25 @@ namespace MaxyGames.UNode.Editors.Analyzer {
 					RegisterDuplicate(analyzer, graphData, fullName, nativeMethod.Name, "method", nativeMethod.DeclaringType, kind);
 				}
 			}
+		}
+
+		/// <summary>
+		/// True when this asset has C# output produced by uNode: either the manual-compile
+		/// convention of a script beside the asset, or the recorded location of its last
+		/// generation. Such output compiles into the merged class, so everything it contains
+		/// that matches an authored member is legitimate rather than a duplicate.
+		/// </summary>
+		private static bool HasGeneratedOutput(GraphAsset asset) {
+			var assetPath = AssetDatabase.GetAssetPath(asset);
+			if(!string.IsNullOrEmpty(assetPath)) {
+				var beside = System.IO.Path.ChangeExtension(assetPath, ".cs");
+				if(System.IO.File.Exists(beside))
+					return true;
+			}
+			var data = GenerationUtility.GetGraphData(asset);
+			if(data != null && !string.IsNullOrEmpty(data.path) && System.IO.File.Exists(data.path))
+				return true;
+			return false;
 		}
 
 		/// <summary>
