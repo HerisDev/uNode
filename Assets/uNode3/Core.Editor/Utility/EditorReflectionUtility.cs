@@ -99,6 +99,7 @@ namespace MaxyGames.UNode.Editors {
 				var all = new List<RuntimeType>();
 				var canonical = new List<RuntimeType>();
 				var seenNames = new HashSet<string>();
+				var partialOwners = new Dictionary<string, List<GraphAsset>>();
 				foreach(var entry in collected) {
 					if(!entry.type.IsValid())
 						continue;
@@ -109,7 +110,18 @@ namespace MaxyGames.UNode.Editors {
 					}
 					if(IsPartialGraph(entry.type)) {
 						m_partialClaimedNames.Add(fullName);
+						//Track every live owner of each combined type so the registry can
+						//keep its half list current and re-point after deletions.
+						if(!partialOwners.TryGetValue(fullName, out var owners)) {
+							owners = new List<GraphAsset>();
+							partialOwners[fullName] = owners;
+						}
+						owners.Add(entry.owner as GraphAsset);
 					}
+				}
+				foreach(var pair in partialOwners) {
+					var instance = GetOrCreateTrackedPartialType(pair.Key);
+					instance?.SyncOwnerAssets(pair.Value);
 				}
 				m_allRuntimeTypes = all.ToArray();
 				_runtimeTypes = canonical.ToArray();
@@ -135,6 +147,10 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		private static readonly Dictionary<string, RuntimePartialGraphType> m_partialTypes = new Dictionary<string, RuntimePartialGraphType>();
+
+		private static RuntimePartialGraphType GetOrCreateTrackedPartialType(string fullName) {
+			return m_partialTypes.TryGetValue(fullName, out var existing) ? existing : null;
+		}
 
 		/// <summary>
 		/// The one combined <see cref="RuntimePartialGraphType"/> of the partial class under

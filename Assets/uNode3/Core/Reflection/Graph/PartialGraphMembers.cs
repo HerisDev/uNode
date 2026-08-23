@@ -104,11 +104,22 @@ namespace MaxyGames.UNode {
 		/// <summary>
 		/// The owning graph asset behind a runtime graph type, regardless of which wrapper
 		/// kind presents it (`RuntimeGraphType`, `RuntimePartialGraphType` or legacy native
-		/// wrappers).
+		/// wrappers). For combined partial types the first still-alive half wins, so gates
+		/// keep working after a half is deleted.
 		/// </summary>
 		public static GraphAsset GetOwnerAsset(RuntimeType type) {
-			if(type is IPartialGraphType partial)
-				return partial.ownerAsset;
+			if(type is IPartialGraphType partial) {
+				if(partial.ownerAsset != null)
+					return partial.ownerAsset;
+				var halves = partial.ownerAssets;
+				if(halves != null) {
+					for(int i = 0; i < halves.Count; i++) {
+						if(halves[i] != null)
+							return halves[i];
+					}
+				}
+				return null;
+			}
 			if(type is RuntimeGraphType graphType)
 				return graphType.target;
 			if(type is RuntimeNativeGraph nativeGraph)

@@ -462,7 +462,7 @@ namespace MaxyGames.UNode {
 			return null;
 		}
 
-		public BaseReference GetReference() {
+		public virtual BaseReference GetReference() {
 			return new GraphRef(target);
 		}
 

@@ -1183,6 +1183,80 @@ namespace MaxyGames.UNode {
 	}
 
 	/// <summary>
+	/// A reference to a combined partial graph class. Unlike a plain graph reference it
+	/// persists every half asset plus the full type name, so losing any single half - or
+	/// all of them once the class was generated to C# - never breaks the reference.
+	/// </summary>
+	[Serializable]
+	public class PartialTypeRef : BaseUnityObjectReference {
+		[SerializeField]
+		private string _typeName;
+		[SerializeField]
+		private List<GraphAsset> _halves;
+
+		public PartialTypeRef(IPartialGraphType type) : base(type.ownerAsset) {
+			_typeName = type.fullTypeName;
+			if(type.ownerAssets != null) {
+				_halves = new List<GraphAsset>(type.ownerAssets);
+			}
+			else {
+				_halves = new List<GraphAsset>();
+			}
+		}
+
+		private PartialTypeRef(string typeName, List<GraphAsset> halves) : base(GetAliveHalf(halves)) {
+			_typeName = typeName;
+			_halves = halves ?? new List<GraphAsset>();
+		}
+
+		public string typeName => _typeName;
+
+		/// <summary>
+		/// The first half that is still alive; deleted ones deserialize as null.
+		/// </summary>
+		public GraphAsset aliveHalf => GetAliveHalf(_halves);
+
+		public override bool isValid => aliveHalf != null;
+
+		public override string name => _typeName;
+
+		private static GraphAsset GetAliveHalf(List<GraphAsset> halves) {
+			if(halves != null) {
+				for(int i = 0; i < halves.Count; i++) {
+					if(halves[i] != null)
+						return halves[i];
+				}
+			}
+			return null;
+		}
+
+		/// <summary>
+		/// The combined runtime type: the surviving half's reflection type when any half
+		/// lives, otherwise the compiled class resolved by the persisted full name.
+		/// </summary>
+		public Type ResolveType() {
+			var half = aliveHalf;
+			if(half is IReflectionType reflection && reflection.ReflectionType != null) {
+				return reflection.ReflectionType;
+			}
+			if(!string.IsNullOrEmpty(_typeName)) {
+				return _typeName.ToType(false);
+			}
+			return null;
+		}
+
+		public override object ReferenceValue {
+			get {
+				var half = aliveHalf;
+				if(half != null)
+					return half;
+				//Every asset is gone but the class may still exist compiled.
+				return string.IsNullOrEmpty(_typeName) ? null : _typeName.ToType(false);
+			}
+		}
+	}
+
+	/// <summary>
 	/// This class used to save type data
 	/// </summary>
 	[Serializable]
