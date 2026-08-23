@@ -1200,25 +1200,35 @@ namespace MaxyGames.UNode.Editors {
 					item.value = de.entry;
 					item.userData = de;
 
-					// Drag behavior: virtual rows are read-only (no drop inside), and
-					// member rows are permanently bound to their type header.
-					// Reordering is also disabled while searching (flat relevance view).
+					// Drag behavior:
+					// - Type & Member rows are graph-draggable (payload key "uNode",
+					//   matching the NodeBrowser/graph contract), including virtual
+					//   rows generated from namespaces/types.
+					// - Reordering stays limited to persisted non-virtual rows and is
+					//   disabled while searching; virtual entries can never reorder —
+					//   CanMove/MoveEntry reject them, so stray drops are ignored.
 					bool isVirtual = de.isVirtualChild || de.entry.isVirtual;
-					bool isMember = de.entry.kind == FavoriteKind.Member;
 					bool hasSearch = !string.IsNullOrEmpty(searchString);
-					bool canDrag = !isVirtual && !isMember && !hasSearch;
+					var graphPayload = GetGraphDragPayload(de.entry);
+					bool isGraphItem = graphPayload != null;
+					bool canReorder = !isVirtual && !hasSearch;
+					bool canDrag = isGraphItem || canReorder;
 					item.CanDragFunc = () => canDrag;
-					item.CanDragInsideParentFunc = () => canDrag;
+					item.CanDragInsideParentFunc = () => canReorder;
 					item.CanHaveChildsFunc = () => de.entry.kind == FavoriteKind.Folder && !de.entry.isVirtual && !hasSearch;
 
-					// Set drag payload (null for virtual rows = read-only).
+					// Drag payload: reorder keys plus the "uNode" graph contract
+					// (System.Type or MemberInfo — what UGraphView/BlockNodeView read).
 					item.GetDragGenericData = () => {
-						if(isVirtual)
+						if(!canDrag)
 							return null;
-						return new Dictionary<string, object> {
+						var data = new Dictionary<string, object> {
 							{ "favoriteID", de.entry.id },
 							{ "favoriteCategory", de.entry.categoryID },
 						};
+						if(graphPayload != null)
+							data["uNode"] = graphPayload;
+						return data;
 					};
 
 					// Manual selection handling (GraphPanel pattern).
@@ -2070,6 +2080,33 @@ namespace MaxyGames.UNode.Editors {
 				return;
 			}
 			CreateNode(de);
+		}
+
+		/// <summary>
+		/// Payload for dragging an entry onto the graph editor — matches the
+		/// NodeBrowser/graph contract under the "uNode" generic key:
+		/// System.Type for type items, reflected MemberInfo for member items.
+		/// Returns null when the item cannot be dragged to a graph.
+		/// </summary>
+		object GetGraphDragPayload(FavoritesDataAsset.Entry e) {
+			if(e == null)
+				return null;
+			switch(e.kind) {
+				case FavoriteKind.Type: {
+					try { return ResolveEntryType(e); }
+					catch { return null; }
+				}
+				case FavoriteKind.Member: {
+					MemberInfo mi = null;
+					try { mi = FavoritesManager.GetEntryMember(e); } catch { }
+					if(mi is Type || mi is FieldInfo || mi is PropertyInfo ||
+						mi is MethodInfo || mi is ConstructorInfo)
+						return mi;
+					return null;
+				}
+				default:
+					return null;
+			}
 		}
 
 		Type ResolveEntryType(FavoritesDataAsset.Entry e) {
