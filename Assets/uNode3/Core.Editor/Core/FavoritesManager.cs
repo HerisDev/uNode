@@ -518,6 +518,18 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
+		/// Mode-aware visibility of a reflected member under a type favorite.
+		/// IncludeAll → visible unless listed; ExcludeAll → visible only when
+		/// listed. A null owner (e.g. namespace virtual types) is always visible.
+		/// </summary>
+		public static bool IsMemberVisibleIn(FavoritesDataAsset.Entry typeEntry, MemberInfo member) {
+			if(typeEntry == null || member == null)
+				return true;
+			bool inList = typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(member.Name);
+			return typeEntry.memberMode == TypeMemberMode.ExcludeAll ? inList : !inList;
+		}
+
+		/// <summary>
 		/// Read-only: generate virtual member entries for the given type item.
 		/// Members are never persisted — they are bound to their type, and their
 		/// visibility is driven by memberMode + the entry's excludedMembers list
@@ -539,14 +551,10 @@ namespace MaxyGames.UNode.Editors {
 				return result;
 			}
 			string declName = type.FullName ?? type.Name;
-			bool excludeAll = typeEntry.memberMode == TypeMemberMode.ExcludeAll;
 			foreach(var m in members) {
 				if(m is EventInfo) continue;
 				if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
-				bool inList = typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(m.Name);
-				// IncludeAll: list holds hidden members; ExcludeAll: list holds visible ones.
-				bool visible = excludeAll ? inList : !inList;
-				if(!visible)
+				if(!IsMemberVisibleIn(typeEntry, m))
 					continue;
 				result.Add(new FavoritesDataAsset.Entry {
 					id = "[member]:" + declName + "::" + m.Name + "::" + m.MetadataToken,

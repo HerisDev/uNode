@@ -397,8 +397,10 @@ namespace MaxyGames.UNode.Editors {
 			var seenSyncMembers = new HashSet<string>();
 
 			/// Sync fallback of the worker's CollectTypeMembers: surface generated
-			/// members matching the query under their type's path.
-			void CollectTypeMembersSync(Type type, string typePath) {
+			/// members matching the query under their type's path. When the type is
+			/// favorited (ownerType), its mode-aware member visibility is respected;
+			/// null owner (namespace virtual types) searches everything.
+			void CollectTypeMembersSync(Type type, string typePath, FavoritesDataAsset.Entry ownerType) {
 				if(type == null || type.IsEnum || searchString.Length < ItemSelector.MinWordForDeepTypeSearch)
 					return;
 				MemberInfo[] members;
@@ -407,6 +409,9 @@ namespace MaxyGames.UNode.Editors {
 				foreach(var m in members) {
 					if(m is EventInfo) continue;
 					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+					// Respect the owner type's IncludeAll/ExcludeAll visibility.
+					if(!FavoritesManager.IsMemberVisibleIn(ownerType, m))
+						continue;
 					string key = (type.FullName ?? type.Name) + "::" + m.Name + "::" + m.MetadataToken;
 					if(!seenSyncMembers.Add(key)) continue;
 					float score = -1f;
@@ -452,7 +457,7 @@ namespace MaxyGames.UNode.Editors {
 							AddResult(vc, nsPath);
 							Type vt = null;
 							try { vt = vc.targetType?.type; } catch { }
-							CollectTypeMembersSync(vt, JoinPath(nsPath, vt?.Name ?? vc.displayName));
+							CollectTypeMembersSync(vt, JoinPath(nsPath, vt?.Name ?? vc.displayName), null);
 						}
 						break;
 					}
@@ -464,8 +469,9 @@ namespace MaxyGames.UNode.Editors {
 								CollectEntry(c, typePath);
 							Type t = null;
 							try { t = e.resolvedType; } catch { }
-							// Generated members under this favorited type.
-							CollectTypeMembersSync(t, typePath);
+							// Generated members under this favorited type
+							// (hidden members per its mode are skipped).
+							CollectTypeMembersSync(t, typePath, e);
 						}
 						break;
 				}
@@ -713,7 +719,12 @@ namespace MaxyGames.UNode.Editors {
 			/// which is thread-safe; the transient entries it creates are never
 			/// persisted and resolve lazily on the UI thread when bound.
 			/// </summary>
-			void CollectTypeMembers(Type type, string typePath) {
+			/// <summary>
+			/// Deep member search. When the type is a favorited entry (ownerType),
+			/// its mode-aware member visibility is respected — hidden members are
+			/// skipped. Null owner (namespace virtual types) searches everything.
+			/// </summary>
+			void CollectTypeMembers(Type type, string typePath, FavoritesDataAsset.Entry ownerType) {
 				if(!deepSearch || type == null || type.IsEnum)
 					return;
 				token.ThrowIfCancellationRequested();
@@ -725,6 +736,9 @@ namespace MaxyGames.UNode.Editors {
 					token.ThrowIfCancellationRequested();
 					if(m is EventInfo) continue;
 					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+					// Respect the owner type's IncludeAll/ExcludeAll visibility.
+					if(!FavoritesManager.IsMemberVisibleIn(ownerType, m))
+						continue;
 					float score = ScoreMemberName(m.Name);
 					if(score < 0f) continue;
 					var entry = new FavoritesDataAsset.Entry {
@@ -783,8 +797,9 @@ namespace MaxyGames.UNode.Editors {
 									displayName = vc.targetType?.type?.Name ?? vc.displayName,
 								}, score, nsPath);
 							}
-							// Deep member search inside namespace types too.
-							CollectTypeMembers(t, JoinPath(nsPath, t?.Name ?? vc.displayName));
+							// Deep member search inside namespace types too
+							// (null owner → visibility rules don't apply to them).
+							CollectTypeMembers(t, JoinPath(nsPath, t?.Name ?? vc.displayName), null);
 						}
 						break;
 					}
@@ -794,11 +809,12 @@ namespace MaxyGames.UNode.Editors {
 							AddResult(item, s, parentPath);
 						// Deep member search inside favorited types — members are
 						// generated from the type, so this is their only source.
+						// Hidden members (per the type's mode) are skipped.
 						if(item.kind == FavoriteKind.Type && !item.isVirtual) {
 							var typePath = JoinPath(parentPath, item.displayName);
 							foreach(var c in ChildrenOf(item.id))
 								CollectEntry(c, typePath);
-							CollectTypeMembers(item.resolvedRuntimeType, typePath);
+							CollectTypeMembers(item.resolvedRuntimeType, typePath, item.entry);
 						}
 						break;
 				}
