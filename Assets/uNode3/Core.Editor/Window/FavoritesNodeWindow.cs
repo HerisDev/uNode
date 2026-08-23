@@ -1527,7 +1527,7 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		void UpdateDetailPanel() {
-			if(selectedEntry == null) {
+			if(selectedEntry == null || selectedEntry.entry == null) {
 				detailNameLabel.text = "No selection";
 				detailTypeLabel.text = "";
 				detailScroll.Clear();
@@ -1538,7 +1538,142 @@ namespace MaxyGames.UNode.Editors {
 			detailTypeLabel.text = e.kind + (e.kind == FavoriteKind.Namespace ? "  —  " + e.displayName : e.kind == FavoriteKind.Type || e.kind == FavoriteKind.Node ? "  —  " + e.typeName : "");
 
 			detailScroll.Clear();
-			// TODO: add summary for selections
+			foreach(var line in BuildSummaryLines(e)) {
+				AddSummaryRow(detailScroll, line.icon, line.text);
+			}
+		}
+
+		// ═══════════════════════════════════════
+		//  Detail Summary
+		// ═══════════════════════════════════════
+
+		struct SummaryLine {
+			public Texture icon;
+			public string text;
+
+			public SummaryLine(Texture icon, string text) {
+				this.icon = icon;
+				this.text = text;
+			}
+		}
+
+		/// <summary>
+		/// Builds the selection summary shown in the detail panel, mirroring the
+		/// ItemSelector/NodeBrowser tooltip contents (declaring type, assembly,
+		/// target/static, return/value type, XML documentation, parameters).
+		/// </summary>
+		List<SummaryLine> BuildSummaryLines(FavoritesDataAsset.Entry e) {
+			var lines = new List<SummaryLine>();
+
+			// Location breadcrumb (parent chain within the category).
+			var path = BuildEntryPath(e);
+			if(!string.IsNullOrEmpty(path))
+				lines.Add(new SummaryLine(null, path));
+
+			switch(e.kind) {
+				case FavoriteKind.Member: {
+					var mi = FavoritesManager.GetEntryMember(e);
+					if(mi != null) {
+						var contents = ItemSelector.Utility.GetTooltipContents(mi);
+						// Index 0 duplicates the panel title — skip it.
+						for(int i = 1; i < contents.Count; i++) {
+							lines.Add(new SummaryLine(contents[i].image, contents[i].text));
+						}
+					}
+					else if(!string.IsNullOrEmpty(e.memberName)) {
+						lines.Add(new SummaryLine(GetMemberKindIcon(null), "(unresolved) " + e.memberName));
+					}
+					break;
+				}
+				case FavoriteKind.Type: {
+					Type t = null;
+					try { t = ResolveEntryType(e); } catch { }
+					if(t != null) {
+						lines.Add(new SummaryLine(uNodeEditorUtility.GetTypeIcon(t), t.PrettyName(true)));
+						if(t.Assembly != null)
+							lines.Add(new SummaryLine(null, "Assembly: " + t.Assembly.GetName().Name));
+						AppendDocumentation(lines, t);
+						int memberCount = FavoritesManager.GetVirtualTypeMembers(e).Count;
+						lines.Add(new SummaryLine(null, memberCount + " visible members"));
+					}
+					break;
+				}
+				case FavoriteKind.Namespace: {
+					int count = FavoritesManager.GetVirtualNamespaceChildren(e).Count;
+					lines.Add(new SummaryLine(null, count + " types"));
+					break;
+				}
+				case FavoriteKind.Folder: {
+					int count = FavoritesManager.GetChildren(e.categoryID, e.id).Count;
+					lines.Add(new SummaryLine(null, count + " items"));
+					break;
+				}
+				case FavoriteKind.Node: {
+					if(!string.IsNullOrEmpty(e.nodeMenuName))
+						lines.Add(new SummaryLine(null, e.nodeMenuName));
+					Type t = ResolveOwningNodeTypeSafe(e);
+					if(t != null)
+						AppendDocumentation(lines, t);
+					break;
+				}
+			}
+			return lines;
+		}
+
+		Type ResolveOwningNodeTypeSafe(FavoritesDataAsset.Entry e) {
+			try { return e.resolvedType; } catch { return null; }
+		}
+
+		string BuildEntryPath(FavoritesDataAsset.Entry e) {
+			var segments = new List<string>();
+			var visited = new HashSet<string>();
+			var current = e.parentID;
+			int depth = 0;
+			while(!string.IsNullOrEmpty(current) && depth < 16 && visited.Add(current)) {
+				var parent = FavoritesManager.asset.entries.FirstOrDefault(x => x.id == current);
+				if(parent == null)
+					break;
+				segments.Insert(0, GetDisplayName(parent));
+				current = parent.parentID;
+				depth++;
+			}
+			return segments.Count > 0 ? string.Join(" > ", segments) : null;
+		}
+
+		void AppendDocumentation(List<SummaryLine> lines, MemberInfo member) {
+			if(!XmlDoc.hasLoadDoc || member == null)
+				return;
+			try {
+				var docElement = XmlDoc.XMLFromMember(member)?["summary"];
+				if(docElement != null && !string.IsNullOrWhiteSpace(docElement.InnerText)) {
+					lines.Add(new SummaryLine(null, "<b>Documentation ▼</b> " + docElement.InnerText.Trim()));
+				}
+			}
+			catch { }
+		}
+
+		/// <summary>Renders one summary line as an icon + wrapping rich-text label.</summary>
+		void AddSummaryRow(VisualElement parent, Texture icon, string text) {
+			if(string.IsNullOrEmpty(text))
+				return;
+			var row = new VisualElement {
+				style = { flexDirection = FlexDirection.Row, alignItems = Align.FlexStart, marginTop = 1, marginBottom = 1 }
+			};
+			if(icon != null) {
+				var img = new Image { image = icon };
+				img.style.width = 14;
+				img.style.height = 14;
+				img.style.flexShrink = 0;
+				img.style.marginRight = 4;
+				img.style.marginTop = 1;
+				row.Add(img);
+			}
+			var lbl = new Label(text) { enableRichText = true };
+			lbl.style.whiteSpace = WhiteSpace.Normal;
+			lbl.style.flexGrow = 1;
+			lbl.style.fontSize = 11;
+			row.Add(lbl);
+			parent.Add(row);
 		}
 
 		// ═══════════════════════════════════════
