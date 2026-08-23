@@ -317,7 +317,7 @@ namespace MaxyGames.UNode.Editors {
 
 					// For namespace entries, append virtual type children (not reorderable).
 					if(entry.kind == FavoriteKind.Namespace && !entry.isVirtual && !inNamespace) {
-						var virtualChildren = FavoritesManager.GetVirtualNamespaceChildren(entry.displayName);
+						var virtualChildren = FavoritesManager.GetVirtualNamespaceChildren(entry);
 						foreach(var vc in virtualChildren) {
 							int vID = AssignStableTreeID(vc, treeIDMap);
 							var vde = new DisplayEntry {
@@ -452,8 +452,9 @@ namespace MaxyGames.UNode.Editors {
 						var nsPath = JoinPath(parentPath, name);
 						foreach(var c in ChildrenOf(e.id))
 							CollectEntry(c, nsPath);
-						// Virtual types from the namespace expansion are searchable too.
-						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(name)) {
+						// Virtual types from the namespace expansion are searchable too
+					// (namespace visibility mode applies).
+						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(e)) {
 							AddResult(vc, nsPath);
 							Type vt = null;
 							try { vt = vc.targetType?.type; } catch { }
@@ -776,7 +777,8 @@ namespace MaxyGames.UNode.Editors {
 							CollectEntry(c, nsPath);
 						// Virtual types of the namespace are searchable candidates.
 						// Safe off-thread: pure reflection over loaded assemblies.
-						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(item.displayName)) {
+						// Namespace visibility mode applies.
+						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(item.entry)) {
 							token.ThrowIfCancellationRequested();
 							Type t = null;
 							float score = -1f;
@@ -1119,7 +1121,7 @@ namespace MaxyGames.UNode.Editors {
 			var addMenu = new ToolbarButton(ShowAddMenu) { text = "+ Add", tooltip = "Add Item" };
 			toolbar.Add(addMenu);
 
-			addMembersButton = new ToolbarButton(() => OpenAddMembersPopup()) { text = "+ Members", tooltip = "Add sub-members" };
+			addMembersButton = new ToolbarButton(() => OpenAddMembersPopup()) { text = "+ Members", tooltip = "Add Members (type) / Types (namespace)" };
 			addMembersButton.SetEnabled(false);
 			toolbar.Add(addMembersButton);
 
@@ -1453,10 +1455,17 @@ namespace MaxyGames.UNode.Editors {
 			var e = de.entry;
 
 			if(de.isVirtualChild || e.isVirtual) {
-				// Virtual rows are read-only; node creation and (for members bound
-				// to a favorited type) remove-to-exclude are offered.
+				// Virtual rows are read-only; node creation and (for rows bound to a
+				// favorited owner) remove-to-hide are offered.
 				if(e.kind == FavoriteKind.Type) {
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
+					// Virtual types owned by a favorited namespace can be hidden
+					// (persisted in the namespace's mode list).
+					var nsOwner = ResolveOwningNamespace(e);
+					if(nsOwner != null && !string.IsNullOrEmpty(e.displayName)) {
+						evt.menu.AppendSeparator();
+						evt.menu.AppendAction("Remove", _ => SetTypeNameVisible(nsOwner, e.displayName, false));
+					}
 				} else if(e.kind == FavoriteKind.Member && e.targetMember != null) {
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
 					// Removing a generated member persists it in the type's mode list.
@@ -1480,6 +1489,9 @@ namespace MaxyGames.UNode.Editors {
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
 					evt.menu.AppendAction("Add Members...", _ => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(); });
 					break;
+				case FavoriteKind.Namespace:
+					evt.menu.AppendAction("Add Types...", _ => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(); });
+					break;
 				case FavoriteKind.Node:
 				case FavoriteKind.Member:
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
@@ -1495,8 +1507,11 @@ namespace MaxyGames.UNode.Editors {
 		// ═══════════════════════════════════════
 
 		void UpdateAddMembersButton() {
-			if(addMembersButton != null)
-				addMembersButton.SetEnabled(selectedEntry != null && selectedEntry.entry.kind == FavoriteKind.Type && !selectedEntry.isVirtualChild);
+			if(addMembersButton != null) {
+				bool isType = selectedEntry != null && selectedEntry.entry.kind == FavoriteKind.Type && !selectedEntry.isVirtualChild;
+				bool isNamespace = selectedEntry != null && selectedEntry.entry.kind == FavoriteKind.Namespace;
+				addMembersButton.SetEnabled(isType || isNamespace);
+			}
 		}
 
 		void UpdateDetailPanel() {
@@ -1630,6 +1645,48 @@ namespace MaxyGames.UNode.Editors {
 			return FavoritesManager.asset.entries.FirstOrDefault(x => x.id == ownerID);
 		}
 
+		/// <summary>
+		/// Resolves the favorited namespace entry that owns a generated virtual
+		/// type row (parentID format: "[nsentry]:&lt;entryId&gt;"). Returns null for
+		/// rows without a favorited owner.
+		/// </summary>
+		FavoritesDataAsset.Entry ResolveOwningNamespace(FavoritesDataAsset.Entry typeEntry) {
+			const string prefix = "[nsentry]:";
+			if(typeEntry == null || string.IsNullOrEmpty(typeEntry.parentID) || !typeEntry.parentID.StartsWith(prefix))
+				return null;
+			var ownerID = typeEntry.parentID.Substring(prefix.Length);
+			return FavoritesManager.asset.entries.FirstOrDefault(x => x.id == ownerID);
+		}
+
+		/// <summary>
+		/// Show/hide a generated virtual type under its namespace favorite by
+		/// toggling the name in the namespace's mode list (mirrors SetMemberVisible).
+		/// </summary>
+		void SetTypeNameVisible(FavoritesDataAsset.Entry nsEntry, string typeName, bool visible) {
+			if(nsEntry == null || string.IsNullOrEmpty(typeName))
+				return;
+			if(nsEntry.excludedMembers == null)
+				nsEntry.excludedMembers = new List<string>();
+			bool shouldContain = nsEntry.memberMode == TypeMemberMode.ExcludeAll ? visible : !visible;
+			bool changed;
+			if(shouldContain) {
+				if(!nsEntry.excludedMembers.Contains(typeName)) {
+					nsEntry.excludedMembers.Add(typeName);
+					changed = true;
+				}
+				else {
+					changed = false;
+				}
+			}
+			else {
+				changed = nsEntry.excludedMembers.Remove(typeName);
+			}
+			if(changed) {
+				FavoritesManager.Save();
+				FavoritesManager.NotifyChanged();
+			}
+		}
+
 		void RemoveSelected() {
 			if(selectedEntry == null || selectedEntry.entry == null)
 				return;
@@ -1660,7 +1717,14 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		void OpenAddMembersPopup() {
-			if(selectedEntry == null || selectedEntry.entry.kind != FavoriteKind.Type) return;
+			if(selectedEntry == null || selectedEntry.isVirtualChild) return;
+			// Namespace favorites manage their generated TYPE list instead.
+			if(selectedEntry.entry.kind == FavoriteKind.Namespace) {
+				ActionPopupWindow.Show(() => BuildNamespaceTypesUI(selectedEntry.entry))
+					.ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
+				return;
+			}
+			if(selectedEntry.entry.kind != FavoriteKind.Type) return;
 			var e = selectedEntry.entry;
 			if(e.isVirtual) return;
 			var type = e.resolvedType;
@@ -1792,6 +1856,144 @@ namespace MaxyGames.UNode.Editors {
 			if(member is PropertyInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.PropertyIcon));
 			if(member is FieldInfo) return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.FieldIcon));
 			return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.ExtensionIcon));
+		}
+
+		/// <summary>Recycled row for the namespace types TreeView popup.</summary>
+		class TypeToggleRow : VisualElement {
+			public Toggle toggle;
+			public Image icon;
+			public Label label;
+			public Action<bool> onToggle;
+		}
+
+		/// <summary>
+		/// Builds the 'Types of' popup content using a virtualized TreeView —
+		/// namespaces can expose many types, so rows must be recycled.
+		/// </summary>
+		VisualElement BuildNamespaceTypesUI(FavoritesDataAsset.Entry nsEntry) {
+			var root = new VisualElement();
+			root.style.paddingTop = 8;
+			root.style.paddingBottom = 8;
+			root.style.paddingLeft = 10;
+			root.style.paddingRight = 10;
+			root.style.minWidth = 400;
+			root.focusable = true;
+			root.RegisterCallback<KeyDownEvent>(evt => {
+				if(evt.keyCode == KeyCode.Escape) {
+					ActionPopupWindow.CloseLast();
+					evt.StopPropagation();
+				}
+			});
+
+			root.Add(new Label("Types of " + GetDisplayName(nsEntry)) {
+				style = { unityFontStyleAndWeight = FontStyle.Bold, marginBottom = 6 }
+			});
+
+			var candidates = FavoritesManager.GetVirtualNamespaceChildren(nsEntry, true);
+
+			// Stable ids derived from the entry id (hash + collision probe), built
+			// up-front so bindItem can resolve data by index without a self-reference.
+			var usedIDs = new HashSet<int>();
+			var items = new List<TreeViewItemData<FavoritesDataAsset.Entry>>(candidates.Count);
+			foreach(var cand in candidates) {
+				int id = cand.id.GetHashCode();
+				while(!usedIDs.Add(id))
+					id++;
+				items.Add(new TreeViewItemData<FavoritesDataAsset.Entry>(id, cand));
+			}
+
+			TreeView typeTree = null;
+			void RefreshRows() {
+				typeTree?.RefreshItems();
+			}
+
+			// ── Toolbar: mode switch / Select All / Deselect All / spacer / Close ──
+			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6, flexWrap = Wrap.Wrap } };
+			Button CreateToolbarButton(string text, Action onClick) => new Button(onClick) { text = text };
+
+			var includeBtn = CreateToolbarButton("Include All", null);
+			var excludeBtn = CreateToolbarButton("Exclude All", null);
+			void SetModeButtons(TypeMemberMode mode) {
+				bool include = mode == TypeMemberMode.IncludeAll;
+				includeBtn.SetEnabled(!include);
+				excludeBtn.SetEnabled(include);
+			}
+			includeBtn.clicked += () => {
+				if(nsEntry.memberMode == TypeMemberMode.IncludeAll) return;
+				nsEntry.memberMode = TypeMemberMode.IncludeAll;
+				FavoritesManager.Save();
+				FavoritesManager.NotifyChanged();
+				SetModeButtons(nsEntry.memberMode);
+				RefreshRows();
+			};
+			excludeBtn.clicked += () => {
+				if(nsEntry.memberMode == TypeMemberMode.ExcludeAll) return;
+				nsEntry.memberMode = TypeMemberMode.ExcludeAll;
+				FavoritesManager.Save();
+				FavoritesManager.NotifyChanged();
+				SetModeButtons(nsEntry.memberMode);
+				RefreshRows();
+			};
+
+			void SetAllVisible(bool visible) {
+				foreach(var c in candidates)
+					SetTypeNameVisible(nsEntry, c.displayName, visible);
+			}
+			toolbarRow.Add(includeBtn);
+			toolbarRow.Add(excludeBtn);
+			toolbarRow.Add(CreateToolbarButton("Select All", () => { SetAllVisible(true); RefreshRows(); }));
+			toolbarRow.Add(CreateToolbarButton("Deselect All", () => { SetAllVisible(false); RefreshRows(); }));
+			var toolbarSpacer = new VisualElement { style = { flexGrow = 1 } };
+			toolbarRow.Add(toolbarSpacer);
+			toolbarRow.Add(CreateToolbarButton("Close", () => ActionPopupWindow.CloseLast()));
+			root.Add(toolbarRow);
+
+			// ── Virtualized type list ──
+			typeTree = new TreeView(
+				makeItem: () => {
+					var row = new TypeToggleRow {
+						style = { flexDirection = FlexDirection.Row, alignItems = Align.Center }
+					};
+					row.toggle = new Toggle();
+					row.toggle.style.marginRight = 4;
+					row.toggle.RegisterValueChangedCallback(evt => row.onToggle?.Invoke(evt.newValue));
+					row.Add(row.toggle);
+					row.icon = new Image();
+					row.icon.style.width = 16;
+					row.icon.style.height = 16;
+					row.icon.style.flexShrink = 0;
+					row.icon.style.marginRight = 4;
+					row.Add(row.icon);
+					row.label = new Label();
+					row.label.style.flexGrow = 1;
+					row.Add(row.label);
+					return row;
+				},
+				bindItem: (ve, index) => {
+					if(!(ve is TypeToggleRow row))
+						return;
+					if(index < 0 || index >= items.Count)
+						return;
+					var entry = items[index].data;
+					Type t = null;
+					try { t = entry.targetType?.type; } catch { }
+					string typeName = entry.displayName ?? t?.Name ?? string.Empty;
+					row.toggle.SetValueWithoutNotify(FavoritesManager.IsTypeNameVisibleIn(nsEntry, typeName));
+					row.onToggle = v => SetTypeNameVisible(nsEntry, typeName, v);
+					row.icon.image = t != null ? uNodeEditorUtility.GetTypeIcon(t) : null;
+					row.label.text = t != null ? t.PrettyName() : typeName;
+				}
+			);
+			typeTree.style.height = 340;
+			typeTree.style.flexGrow = 1;
+			typeTree.virtualizationMethod = CollectionVirtualizationMethod.FixedHeight;
+			typeTree.fixedItemHeight = 20;
+			typeTree.selectionType = SelectionType.None;
+			typeTree.showAlternatingRowBackgrounds = AlternatingRowBackground.All;
+			typeTree.SetRootItems(items);
+			typeTree.Rebuild();
+			root.Add(typeTree);
+			return root;
 		}
 
 		static bool IsMemberVisible(FavoritesDataAsset.Entry typeEntry, MemberInfo member) {

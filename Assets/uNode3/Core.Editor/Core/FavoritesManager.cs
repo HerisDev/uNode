@@ -491,10 +491,37 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
+		/// Mode-aware visibility of a type name under a namespace favorite.
+		/// Mirrors IsMemberVisibleIn: IncludeAll hides listed names, ExcludeAll
+		/// shows only listed ones. A null owner is always visible.
+		/// </summary>
+		public static bool IsTypeNameVisibleIn(FavoritesDataAsset.Entry nsEntry, string typeName) {
+			if(nsEntry == null || string.IsNullOrEmpty(typeName))
+				return true;
+			bool inList = nsEntry.excludedMembers != null && nsEntry.excludedMembers.Contains(typeName);
+			return nsEntry.memberMode == TypeMemberMode.ExcludeAll ? inList : !inList;
+		}
+
+		/// <summary>
 		/// Read-only: generate virtual type entries for the given namespace by reflecting over
-		/// loaded assemblies. These are never persisted.
+		/// loaded assemblies. These are never persisted. Unfiltered (legacy API).
 		/// </summary>
 		public static List<FavoritesDataAsset.Entry> GetVirtualNamespaceChildren(string @namespace) {
+			return BuildVirtualNamespaceChildren(@namespace, null, false);
+		}
+
+		/// <summary>
+		/// Generate virtual type entries for a namespace favorite. When
+		/// ignoreVisibility is false the namespace's memberMode + excludedMembers
+		/// list (which hold type names) filter which types are returned.
+		/// </summary>
+		public static List<FavoritesDataAsset.Entry> GetVirtualNamespaceChildren(FavoritesDataAsset.Entry nsEntry, bool ignoreVisibility = false) {
+			if(nsEntry == null)
+				return new List<FavoritesDataAsset.Entry>();
+			return BuildVirtualNamespaceChildren(nsEntry.displayName, nsEntry, ignoreVisibility);
+		}
+
+		static List<FavoritesDataAsset.Entry> BuildVirtualNamespaceChildren(string @namespace, FavoritesDataAsset.Entry nsEntry, bool ignoreVisibility) {
 			var result = new List<FavoritesDataAsset.Entry>();
 			if(string.IsNullOrEmpty(@namespace)) return result;
 			foreach(var asm in AppDomain.CurrentDomain.GetAssemblies()) {
@@ -504,12 +531,15 @@ namespace MaxyGames.UNode.Editors {
 				foreach(var t in types) {
 					if(t == null || t.IsNested || t.Namespace != @namespace) continue;
 					if(t.IsSpecialName || t.Name.Contains('<') || t.Name.StartsWith("__")) continue;
+					if(nsEntry != null && !ignoreVisibility && !IsTypeNameVisibleIn(nsEntry, t.Name))
+						continue;
 					result.Add(new FavoritesDataAsset.Entry {
 						id = "[ns]:" + t.AssemblyQualifiedName,
 						kind = FavoriteKind.Type,
 						targetType = new SerializedType(t),
 						isVirtual = true,
-						parentID = "[ns]:" + @namespace,
+						displayName = t.Name,
+						parentID = nsEntry != null ? "[nsentry]:" + nsEntry.id : "[ns]:" + @namespace,
 					});
 				}
 			}
