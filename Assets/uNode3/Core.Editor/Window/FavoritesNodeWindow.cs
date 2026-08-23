@@ -1569,13 +1569,46 @@ namespace MaxyGames.UNode.Editors {
 				var last = members[members.Length - 1];
 				var declType = last.DeclaringType ?? memberData.startType;
 				if(declType == null) return;
-				// Members are generated from their type item — favoriting a member
-				// just ensures its declaring type is favorited.
 				string pid = parentID ?? string.Empty;
-				if(!FavoritesManager.asset.entries.Any(x =>
+				var typeHeader = FavoritesManager.asset.entries.FirstOrDefault(x =>
 					x.categoryID == currentCategoryID && x.kind == FavoriteKind.Type &&
-					x.typeName == declType.FullName && x.parentID == pid)) {
+					x.typeName == declType.FullName && x.parentID == pid);
+				bool created = false;
+				if(typeHeader == null) {
 					FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry { kind = FavoriteKind.Type, targetType = new SerializedType(declType), parentID = pid });
+					typeHeader = FavoritesManager.asset.entries.FirstOrDefault(x =>
+						x.categoryID == currentCategoryID && x.kind == FavoriteKind.Type &&
+						x.typeName == declType.FullName && x.parentID == pid);
+					created = typeHeader != null;
+				}
+				if(typeHeader == null) return;
+
+				if(created) {
+					// New type item: show ONLY the picked member — exclude the rest.
+					// Candidates must match GetVirtualTypeMembers' enumeration exactly.
+					if(typeHeader.excludedMembers == null)
+						typeHeader.excludedMembers = new List<string>();
+					MemberInfo[] candidates;
+					try {
+						candidates = declType.GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+					}
+					catch {
+						candidates = Array.Empty<MemberInfo>();
+					}
+					foreach(var c in candidates) {
+						if(c is EventInfo) continue;
+						if(c is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
+						if(c.Name == last.Name) continue;
+						if(!typeHeader.excludedMembers.Contains(c.Name))
+							typeHeader.excludedMembers.Add(c.Name);
+					}
+					typeHeader.excludedMembers.Remove(last.Name);
+					FavoritesManager.Save();
+					FavoritesManager.NotifyChanged();
+				}
+				else {
+					// Existing type item: just un-hide the picked member.
+					SetMemberExcluded(typeHeader, last.Name, false);
 				}
 			}
 			ReloadTreeView();
