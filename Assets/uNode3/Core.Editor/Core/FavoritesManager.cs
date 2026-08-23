@@ -145,6 +145,11 @@ namespace MaxyGames.UNode.Editors {
 		public List<Entry> entries = new List<Entry>();
 
 		/// <summary>
+		/// Entry ids whose tree row is currently expanded (persisted with favorites).
+		/// </summary>
+		public List<string> expandedEntries = new List<string>();
+
+		/// <summary>
 		/// Persist this singleton to disk.
 		/// </summary>
 		public void Save() {
@@ -307,9 +312,38 @@ namespace MaxyGames.UNode.Editors {
 
 		public static void RemoveEntry(string entryID) {
 			asset.entries.RemoveAll(e => e.id == entryID);
+			// Drop its persisted expansion flag as well.
+			asset.expandedEntries.Remove(entryID);
 			Save();
 			RaiseChanged();
 		}
+
+		#region Expanded State
+		/// <summary>True when the given entry's tree row is persisted as expanded.</summary>
+		public static bool IsEntryExpanded(string entryID) {
+			return !string.IsNullOrEmpty(entryID) && asset.expandedEntries.Contains(entryID);
+		}
+
+		/// <summary>
+		/// Persist the expanded state of an entry. Only meaningful for entries
+		/// that can have children (folders/namespaces).
+		/// </summary>
+		public static void SetEntryExpanded(string entryID, bool expanded) {
+			if(string.IsNullOrEmpty(entryID))
+				return;
+			bool changed;
+			if(expanded) {
+				changed = !asset.expandedEntries.Contains(entryID);
+				if(changed)
+					asset.expandedEntries.Add(entryID);
+			}
+			else {
+				changed = asset.expandedEntries.Remove(entryID);
+			}
+			if(changed)
+				Save();
+		}
+		#endregion
 
 		/// <summary>
 		/// Remove an entry and all its descendants (folder cascade).
@@ -327,6 +361,7 @@ namespace MaxyGames.UNode.Editors {
 				}
 			}
 			asset.entries.RemoveAll(e => toRemove.Contains(e.id));
+			asset.expandedEntries.RemoveAll(id => toRemove.Contains(id));
 			Save();
 			RaiseChanged();
 		}

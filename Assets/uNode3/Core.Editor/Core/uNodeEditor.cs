@@ -572,68 +572,6 @@ namespace MaxyGames.UNode.Editors {
 
 			#endregion
 
-			[System.Runtime.Serialization.OnDeserialized]
-			private void OnDeserialized() {
-				if(favoriteNodeEntries == null) favoriteNodeEntries = new();
-			}
-
-			#region Favorite Node Entries
-			[Serializable]
-			public class FavoriteNodeEntry {
-				public string typeFullName;
-				public string groupName;
-				public List<string> excludedMembers = new List<string>();
-				public int orderIndex;
-			}
-
-			[SerializeField]
-			public List<FavoriteNodeEntry> favoriteNodeEntries = new List<FavoriteNodeEntry>();
-
-			public FavoriteNodeEntry GetOrCreateFavoriteEntry(string typeFullName) {
-				var entry = favoriteNodeEntries.FirstOrDefault(e => e.typeFullName == typeFullName);
-				if(entry == null) {
-					entry = new FavoriteNodeEntry {
-						typeFullName = typeFullName,
-						orderIndex = favoriteNodeEntries.Count
-					};
-					favoriteNodeEntries.Add(entry);
-				}
-				return entry;
-			}
-
-			public void SetFavoriteGroup(string typeFullName, string groupName) {
-				GetOrCreateFavoriteEntry(typeFullName).groupName = groupName;
-			}
-
-			public void SetMemberExcluded(string typeFullName, string memberName, bool excluded) {
-				var entry = GetOrCreateFavoriteEntry(typeFullName);
-				if(excluded) {
-					if(!entry.excludedMembers.Contains(memberName))
-						entry.excludedMembers.Add(memberName);
-				} else {
-					entry.excludedMembers.Remove(memberName);
-				}
-			}
-
-			public bool IsMemberExcluded(string typeFullName, string memberName) {
-				var entry = favoriteNodeEntries.FirstOrDefault(e => e.typeFullName == typeFullName);
-				return entry?.excludedMembers?.Contains(memberName) ?? false;
-			}
-
-			public void MigrateFavoritesIfNeeded() {
-				if(favoriteNodeEntries.Count > 0) return;
-				if(customFavoriteDatas == null) return;
-				if(!customFavoriteDatas.TryGetValue("NODES", out var nodes)) return;
-				int index = 0;
-				foreach(var pair in nodes) {
-					favoriteNodeEntries.Add(new FavoriteNodeEntry {
-						typeFullName = pair.Key,
-						orderIndex = index++,
-					});
-				}
-			}
-			#endregion
-
 			#region Graph Infos
 			public void RegisterGraphInfos(IEnumerable<ScriptInformation> informations, UnityEngine.Object owner, string scriptPath) {
 				if(informations != null) {

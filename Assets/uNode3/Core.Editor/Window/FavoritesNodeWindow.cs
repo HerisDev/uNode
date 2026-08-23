@@ -75,7 +75,24 @@ namespace MaxyGames.UNode.Editors {
 			public List<VisibleRow> rows = new List<VisibleRow>();
 		}
 
-		private int nextTreeID = 1;
+		/// <summary>
+		/// Stable TreeView id derived from the entry id, so expansion state
+		/// survives rebuilds and sessions (sequential ids would reshuffle).
+		/// </summary>
+		static int GetStableTreeID(FavoritesDataAsset.Entry e) {
+			int id = e.id?.GetHashCode() ?? 0;
+			if(id == 0)
+				id = 1; // 0 is not a valid TreeView id
+			return id;
+		}
+
+		/// <summary>Instance variant resolving hash collisions against the current map.</summary>
+		int AssignStableTreeID(FavoritesDataAsset.Entry e, Dictionary<int, DisplayEntry> targetMap) {
+			int id = GetStableTreeID(e);
+			while(targetMap.ContainsKey(id))
+				id++; // rare hash collision — probe deterministically
+			return id;
+		}
 
 		[MenuItem("Tools/uNode/Favorites", false, 104)]
 		public static void ShowWindow() {
@@ -115,6 +132,8 @@ namespace MaxyGames.UNode.Editors {
 		private void OnDisable() {
 			if(window == this)
 				window = null;
+			// Persist expansion before the panel tears down (best effort).
+			try { SnapshotExpandedState(); } catch { }
 			FavoritesManager.onChanged -= OnFavoritesChanged;
 			rootVisualElement?.UnregisterCallback<KeyDownEvent>(OnWindowKeyDown);
 			// Invalidate any in-flight background search so its apply is rejected.
@@ -245,7 +264,6 @@ namespace MaxyGames.UNode.Editors {
 
 		private List<TreeViewItemData<DisplayEntry>> BuildTreeData() {
 			treeIDMap.Clear();
-			nextTreeID = 1;
 			visibleRows.Clear();
 
 			List<FavoritesDataAsset.Entry> allEntries = null;
@@ -284,7 +302,7 @@ namespace MaxyGames.UNode.Editors {
 				for(int i = 0; i < entries.Count; i++) {
 					var entry = entries[i];
 					bool lastChild = i == entries.Count - 1;
-					int myID = nextTreeID++;
+					int myID = AssignStableTreeID(entry, treeIDMap);
 					var de = new DisplayEntry {
 						treeID = myID,
 						entry = entry,
@@ -308,7 +326,7 @@ namespace MaxyGames.UNode.Editors {
 					if(entry.kind == FavoriteKind.Namespace && !entry.isVirtual && !inNamespace) {
 						var virtualChildren = FavoritesManager.GetVirtualNamespaceChildren(entry.displayName);
 						foreach(var vc in virtualChildren) {
-							int vID = nextTreeID++;
+							int vID = AssignStableTreeID(vc, treeIDMap);
 							var vde = new DisplayEntry {
 								treeID = vID,
 								entry = vc,
@@ -348,7 +366,7 @@ namespace MaxyGames.UNode.Editors {
 				float score = ScoreSearchTarget(e);
 				if(score < 0f)
 					return; // no relevance match
-				int id = nextTreeID++;
+				int id = AssignStableTreeID(e, treeIDMap);
 				var de = new DisplayEntry {
 					treeID = id,
 					entry = e,
@@ -534,8 +552,16 @@ namespace MaxyGames.UNode.Editors {
 		/// </summary>
 		SearchResult ComputeFlatSearchInBackground(List<SearchItem> snapshot, string query, CancellationToken token, IProgress<float> progress) {
 			var result = new SearchResult();
-			int nextTreeID = 1;
 			progress?.Report(0f);
+
+			// Stable ids (entry-id hash) keep expansion state aligned across
+			// search/clear cycles; collisions are probed against the local map.
+			int AssignID(FavoritesDataAsset.Entry e) {
+				int id = GetStableTreeID(e);
+				while(result.treeIDMap.ContainsKey(id))
+					id++;
+				return id;
+			}
 
 			var byParent = snapshot
 				.GroupBy(i => i.parentID)
@@ -604,7 +630,7 @@ namespace MaxyGames.UNode.Editors {
 					if(!TryTrackMember(mi))
 						return; // duplicate member (persisted child or already added)
 				}
-				int id = nextTreeID++;
+				int id = AssignID(item.entry);
 				var de = new DisplayEntry {
 					treeID = id,
 					entry = item.entry,
@@ -759,12 +785,15 @@ namespace MaxyGames.UNode.Editors {
 			// Reject stale results from superseded searches / closed windows.
 			if(result == null || generation != _searchGeneration || this == null || entryTreeView == null)
 				return;
+			// Preserve hierarchical expansion before the map is swapped.
+			SnapshotExpandedState();
 			treeIDMap = result.treeIDMap;
 			visibleRows.Clear();
 			visibleRows.AddRange(result.rows);
 			entryTreeView.fixedItemHeight = string.IsNullOrEmpty(searchString) ? 20 : 40;
 			entryTreeView.SetRootItems(result.items);
 			entryTreeView.Rebuild();
+			ApplyExpandedState();
 			HideSearchProgress();
 			UpdateStatusLabel();
 		}
@@ -1215,10 +1244,12 @@ namespace MaxyGames.UNode.Editors {
 
 			// Blank-area context menu (row menus stop propagation so this doesn't double up).
 			entryTreeView.AddManipulator(new ContextualMenuManipulator(evt => {
-				evt.menu.AppendAction("New Folder", e => CreateNewFolder(e.eventInfo.mousePosition));
-				evt.menu.AppendAction("Add Namespace", e => AddNamespaceFavorite(e.eventInfo.mousePosition));
-				evt.menu.AppendAction("Add Type / Member", e => OpenItemSelector(e.eventInfo.mousePosition));
+				evt.menu.AppendAction("New Folder", a => CreateNewFolder(a.eventInfo.mousePosition));
+				evt.menu.AppendAction("Add Namespace", a => AddNamespaceFavorite(a.eventInfo.mousePosition));
+				evt.menu.AppendAction("Add Type / Member", a => OpenItemSelector(a.eventInfo.mousePosition));
 			}));
+			// Last-chance snapshot when the tree detaches (window closing).
+			entryTreeView.RegisterCallback<DetachFromPanelEvent>(_ => SnapshotExpandedState());
 			root.Add(entryTreeView);
 
 			// ── Status / empty state ──
@@ -1265,13 +1296,54 @@ namespace MaxyGames.UNode.Editors {
 			// Data changed — any in-flight background result is now stale.
 			CancelPendingSearch();
 			HideSearchProgress();
+			// Capture expansion before the id map is rebuilt.
+			SnapshotExpandedState();
 			var items = BuildTreeData();
 			// Search rows are double height to fit the title + path description
 			// (same as ItemSelector's relevance results).
 			entryTreeView.fixedItemHeight = string.IsNullOrEmpty(searchString) ? 20 : 40;
 			entryTreeView.SetRootItems(items);
 			entryTreeView.Rebuild();
+			ApplyExpandedState();
 			UpdateStatusLabel();
+		}
+
+		/// <summary>
+		/// Records which expandable rows are currently expanded into the
+		/// persistent store. Must run BEFORE the tree id map is replaced,
+		/// while the old ids still map to live rows.
+		/// </summary>
+		void SnapshotExpandedState() {
+			if(entryTreeView == null || entryTreeView.panel == null)
+				return;
+			if(!string.IsNullOrEmpty(searchString))
+				return; // flat search view has no hierarchy to snapshot
+			foreach(var kv in treeIDMap) {
+				var de = kv.Value;
+				if(de?.entry == null || !de.entry.CanHaveChilds)
+					continue;
+				bool isExpanded;
+				try { isExpanded = entryTreeView.IsExpanded(kv.Key); }
+				catch { continue; }
+				FavoritesManager.SetEntryExpanded(de.entry.id, isExpanded);
+			}
+		}
+
+		/// <summary>Re-expands rows persisted as expanded. Runs after Rebuild.</summary>
+		void ApplyExpandedState() {
+			if(entryTreeView == null || entryTreeView.panel == null)
+				return;
+			if(!string.IsNullOrEmpty(searchString))
+				return;
+			foreach(var kv in treeIDMap) {
+				var de = kv.Value;
+				if(de?.entry == null || !de.entry.CanHaveChilds)
+					continue;
+				if(FavoritesManager.IsEntryExpanded(de.entry.id)) {
+					try { entryTreeView.ExpandItem(kv.Key); }
+					catch { }
+				}
+			}
 		}
 
 		void UpdateStatusLabel() {
