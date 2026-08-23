@@ -65,6 +65,14 @@ namespace MaxyGames.UNode.Editors {
 			}
 			else {
 				var result = windows.FirstOrDefault(f => f != null) as T ?? CreateInstance<T>();
+				if(result.rootVisualElement.childCount > 1) {
+					for(int i = 1; i < result.rootVisualElement.childCount; i++) {
+						if(i == 0) continue;
+						result.rootVisualElement[i].RemoveFromHierarchy();
+						i--;
+						continue;
+					}
+				}
 				result?.Focus();
 				return result;
 			}
@@ -128,6 +136,16 @@ namespace MaxyGames.UNode.Editors {
 				window.onGUIBottom = delegate (ref object obj) { onGUIBottom(); };
 			else
 				window.onGUIBottom = null;
+			window.Initialize();
+			return window;
+		}
+
+		public static T Show(Func<VisualElement> createUI) {
+			T window = Craete(false);
+			var element = createUI?.Invoke();
+			if(element != null) {
+				window.rootVisualElement.Add(element);
+			}
 			window.Initialize();
 			return window;
 		}

@@ -567,7 +567,7 @@ namespace MaxyGames.UNode.Editors {
 				graphOverrideMembers,
 				label,
 				drawElement: (position, index, element) => {
-					EditorGUI.LabelField(position, NodeBrowser.GetPrettyMemberName(element));
+					EditorGUI.LabelField(position, EditorReflectionUtility.GetPrettyMemberName(element));
 				},
 				add: (pos) => {
 					var members = EditorReflectionUtility.GetOverrideMembers(type);
@@ -575,11 +575,11 @@ namespace MaxyGames.UNode.Editors {
 					for(int i = 0; i < members.Count; i++) {
 						var member = members[i];
 						if(member is PropertyInfo) {
-							menu.AddItem(new GUIContent("Properties/" + NodeBrowser.GetPrettyMemberName(member)), graphOverrideMembers.Contains(member), () => {
+							menu.AddItem(new GUIContent("Properties/" + EditorReflectionUtility.GetPrettyMemberName(member)), graphOverrideMembers.Contains(member), () => {
 								graphOverrideMembers.Add(member);
 							});
 						} else {
-							menu.AddItem(new GUIContent("Methods/" + NodeBrowser.GetPrettyMemberName(member)), graphOverrideMembers.Contains(member), () => {
+							menu.AddItem(new GUIContent("Methods/" + EditorReflectionUtility.GetPrettyMemberName(member)), graphOverrideMembers.Contains(member), () => {
 								graphOverrideMembers.Add(member);
 							});
 						}

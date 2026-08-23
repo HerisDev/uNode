@@ -214,13 +214,6 @@ namespace MaxyGames.UNode {
 			}
 		}
 
-		/// <summary>
-		/// The compiled CLR type of the hand-written half of this graph, or null when the
-		/// graph has none. A partial graph is fully usable without an other half; when one
-		/// exists, its members are merged into this type below.
-		/// </summary>
-		public Type OtherHalfType => PartialGraphMembers.GetOtherHalfType(target);
-
 		protected List<EventInfo> events;
 		protected virtual void BuildEvents() {
 			if(events == null) {

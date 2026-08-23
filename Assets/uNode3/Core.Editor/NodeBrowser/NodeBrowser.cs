@@ -102,10 +102,10 @@ namespace MaxyGames.UNode.Editors {
 					}
 				}
 				if(uNodePreference.preferenceData.coloredItem) {
-					return NodeBrowser.GetRichMemberName(member);
+					return EditorReflectionUtility.GetRichMemberName(member);
 				}
 				else {
-					return NodeBrowser.GetPrettyMemberName(member);
+					return EditorReflectionUtility.GetPrettyMemberName(member);
 				}
 			}
 		}
@@ -120,11 +120,11 @@ namespace MaxyGames.UNode.Editors {
 
 		}
 
-		public MemberTreeView(MemberInfo member) : base(member.GetHashCode(), -1, NodeBrowser.GetMemberName(member)) {
+		public MemberTreeView(MemberInfo member) : base(member.GetHashCode(), -1, EditorReflectionUtility.GetMemberName(member)) {
 			this.member = member;
 		}
 
-		public MemberTreeView(MemberInfo member, int id, int depth) : base(id, depth, NodeBrowser.GetMemberName(member)) {
+		public MemberTreeView(MemberInfo member, int id, int depth) : base(id, depth, EditorReflectionUtility.GetMemberName(member)) {
 			this.member = member;
 		}
 
@@ -323,124 +323,6 @@ namespace MaxyGames.UNode.Editors {
 				}
 			}
 		}
-
-		#region Utility
-		public static string GetMemberName(MemberInfo member) {
-			switch(member.MemberType) {
-				case MemberTypes.Constructor:
-					return member.DeclaringType.PrettyName();
-				case MemberTypes.TypeInfo:
-				case MemberTypes.NestedType:
-					return (member as Type).PrettyName();
-			}
-			return member.Name;
-		}
-
-		public static string GetPrettyMemberName(MemberInfo member) {
-			switch(member.MemberType) {
-				case MemberTypes.Method:
-					return EditorReflectionUtility.GetPrettyMethodName(member as MethodInfo, false);
-				case MemberTypes.Constructor:
-					return EditorReflectionUtility.GetPrettyConstructorName(member as ConstructorInfo);
-				case MemberTypes.TypeInfo:
-				case MemberTypes.NestedType:
-					return (member as Type).PrettyName();
-			}
-			return member.Name;
-		}
-
-		public static string GetRichMemberName(MemberInfo member) {
-			Type type = member as Type;
-			if(type != null) {
-				if(type.IsEnum) {
-					return uNodeUtility.WrapTextWithColor(type.PrettyName(), uNodePreference.GetPreference().itemEnumColor, false);
-				}
-				else if(type.IsInterface) {
-					return uNodeUtility.WrapTextWithColor(type.PrettyName(), uNodePreference.GetPreference().itemInterfaceColor, false);
-				}
-				return uNodeUtility.WrapTextWithColor(type.PrettyName(), uNodePreference.GetPreference().itemTypeColor, false);
-			}
-			switch(member.MemberType) {
-				case MemberTypes.Method:
-					return GetRichMethodName(member as MethodInfo, false);
-				case MemberTypes.Constructor:
-					return GetRichConstructorNames(member as ConstructorInfo);
-			}
-			return member.Name;
-		}
-
-		public static string GetRichConstructorNames(ConstructorInfo ctor) {
-			ParameterInfo[] info = ctor.GetParameters();
-			string mConstructur = "(";
-			for(int i = 0; i < info.Length; i++) {
-				var type = info[i].ParameterType;
-				if(type.IsEnum){
-					mConstructur += uNodeUtility.WrapTextWithColor(type.PrettyName(false, info[i]).Split('.').Last(), uNodePreference.GetPreference().itemEnumColor, false);
-				} else if(type.IsInterface) {
-					mConstructur += uNodeUtility.WrapTextWithColor(type.PrettyName(false, info[i]).Split('.').Last(), uNodePreference.GetPreference().itemInterfaceColor, false);
-				} else {
-					mConstructur += uNodeUtility.WrapTextWithColor(type.PrettyName(false, info[i]).Split('.').Last(), uNodePreference.GetPreference().itemTypeColor, false);
-				}
-				mConstructur += " " + info[i].Name;
-				if(i + 1 < info.Length) {
-					mConstructur += ", ";
-				}
-			}
-			mConstructur += ")";
-			return uNodeUtility.WrapTextWithColor("new ", uNodePreference.GetPreference().itemKeywordColor, false) + GetRichMemberName(ctor.DeclaringType) + mConstructur;
-		}
-
-		public static string GetRichMethodName(MethodInfo method, bool includeReturnType = true) {
-			ParameterInfo[] info = method.GetParameters();
-			string mConstructur = null;
-			if(method.IsGenericMethod) {
-				foreach(Type arg in method.GetGenericArguments()) {
-					if(string.IsNullOrEmpty(mConstructur)) {
-						mConstructur += "<" + arg.ToString();
-						continue;
-					}
-					mConstructur += "," + arg.ToString();
-				}
-				mConstructur += ">";
-			}
-			mConstructur += "(";
-			for(int i = 0; i < info.Length; i++) {
-				var type = info[i].ParameterType;
-				if(type.IsEnum){
-					mConstructur += uNodeUtility.WrapTextWithColor(type.PrettyName(false, info[i]).Split('.').Last(), uNodePreference.GetPreference().itemEnumColor, false);
-				} else if(type.IsInterface) {
-					mConstructur += uNodeUtility.WrapTextWithColor(type.PrettyName(false, info[i]).Split('.').Last(), uNodePreference.GetPreference().itemInterfaceColor, false);
-				} else {
-					mConstructur += uNodeUtility.WrapTextWithColor(type.PrettyName(false, info[i]).Split('.').Last(), uNodePreference.GetPreference().itemTypeColor, false);
-				}
-				mConstructur += " " + info[i].Name;
-				if(i + 1 < info.Length) {
-					mConstructur += ", ";
-				}
-			}
-			mConstructur += ")";
-			//string name = method.Name;
-			//switch(name) {
-			//	case "op_Addition":
-			//		name = "Add";
-			//		break;
-			//	case "op_Subtraction":
-			//		name = "Subtract";
-			//		break;
-			//	case "op_Multiply":
-			//		name = "Multiply";
-			//		break;
-			//	case "op_Division":
-			//		name = "Divide";
-			//		break;
-			//}
-			if(includeReturnType) {
-				return GetRichMemberName(method.ReturnType) + " " + method.Name + mConstructur;
-			} else {
-				return method.Name + mConstructur;
-			}
-		}
-		#endregion
 
 		protected override TViewItem BuildRoot() {
 			return new TViewItem { id = 0, depth = -1 };

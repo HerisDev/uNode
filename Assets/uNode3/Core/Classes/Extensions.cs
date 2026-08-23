@@ -390,6 +390,11 @@ namespace MaxyGames.UNode {
 			//return graph.GraphData.id;
 		}
 
+		/// <summary>
+		/// Get the graph namespace
+		/// </summary>
+		/// <param name="graph"></param>
+		/// <returns></returns>
 		public static string GetGraphNamespace(this IGraph graph) {
 			if(graph == null) return string.Empty;
 			if(graph is ITypeGraph typeGraph) {
@@ -407,6 +412,11 @@ namespace MaxyGames.UNode {
 			return string.Empty;
 		}
 
+		/// <summary>
+		/// The the graph name including namespace
+		/// </summary>
+		/// <param name="graph"></param>
+		/// <returns></returns>
 		public static string GetFullGraphName(this IGraph graph) {
 			if(graph == null) return string.Empty;
 			if(graph is ITypeGraph typeGraph) {

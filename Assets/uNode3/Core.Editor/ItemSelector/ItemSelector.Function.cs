@@ -564,10 +564,10 @@ namespace MaxyGames.UNode.Editors {
 
 				string displayName;
 				if(uNodePreference.preferenceData.coloredItem) {
-					displayName = NodeBrowser.GetRichMemberName(member);
+					displayName = EditorReflectionUtility.GetRichMemberName(member);
 				}
 				else {
-					displayName = NodeBrowser.GetPrettyMemberName(member);
+					displayName = EditorReflectionUtility.GetPrettyMemberName(member);
 				}
 				Texture icon = uNodeEditorUtility.GetIcon(member);
 				contents.Add(new GUIContent(displayName, icon));

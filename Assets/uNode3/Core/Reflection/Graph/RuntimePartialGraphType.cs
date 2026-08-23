@@ -111,7 +111,11 @@ namespace MaxyGames.UNode {
 
 		protected override void BuildEvents() {
 			base.BuildEvents();
-			var otherHalf = OtherHalfType;
+			//Only a human-authored half can declare events; everything the graph generated
+			//mirrors authored members, which carry no event infos of their own.
+			if(PartialGraphMembers.Get(target).Count == 0)
+				return;
+			var otherHalf = PartialGraphMembers.GetCompiledType(target);
 			if(otherHalf != null) {
 				foreach(var nativeEvent in otherHalf.GetEvents(MemberData.flags)) {
 					events.Add(new RuntimeGraphExternalEvent(this, nativeEvent));
@@ -120,9 +124,7 @@ namespace MaxyGames.UNode {
 		}
 
 		public override Type GetNativeType() {
-			//The merged generated class once produced, otherwise the compiled hand-written
-			//half while only it exists; fall back to the base proxy resolution last.
-			var otherHalf = OtherHalfType;
+			var otherHalf = PartialGraphMembers.GetCompiledType(target);
 			if(otherHalf != null)
 				return otherHalf;
 			return base.GetNativeType();

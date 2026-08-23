@@ -240,6 +240,18 @@ namespace MaxyGames.UNode.Editors.Drawer {
 				EditorGUILayout.BeginVertical("Box");
 				if(GUILayout.Button(new GUIContent(member.target.GetDisplayName().Split('.').FirstOrDefault()), EditorStyles.popup)) {
 					GUI.changed = false;
+#if UNODE_DEV
+					if(Event.current.button == 1) {
+						GenericMenu menu = new GenericMenu();
+						menu.AddItem(new GUIContent("Export to JSON"), false, () => {
+							var bytes = OdinSerializer.SerializationUtility.SerializeValue(member, OdinSerializer.DataFormat.JSON, out _);
+							Debug.Log(System.Text.Encoding.UTF8.GetString(bytes));
+							uNodeEditorUtility.CopyToClipboard(System.Text.Encoding.UTF8.GetString(bytes));
+						});
+						menu.ShowAsContext();
+						return;
+					}
+#endif
 					if(customChangeAction != null) {
 						customChangeAction();
 					}

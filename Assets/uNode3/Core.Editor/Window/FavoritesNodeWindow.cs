@@ -24,7 +24,7 @@ namespace MaxyGames.UNode.Editors {
 		private VisualElement detailArea;
 		private Label detailNameLabel;
 		private Label detailTypeLabel;
-		private ScrollView memberScroll;
+		private ScrollView detailScroll;
 		private Button removeButton;
 		private Button addMembersButton;
 
@@ -178,13 +178,16 @@ namespace MaxyGames.UNode.Editors {
 
 		void ShowAddMenu() {
 			var menu = new GenericMenu();
-			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder());
-			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite());
-			menu.AddItem(new GUIContent("Type / Member"), false, () => OpenItemSelector());
+			var pos = Event.current.mousePosition;
+			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder(pos));
+			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite(pos));
+			menu.AddItem(new GUIContent("Type or Member"), false, () => OpenItemSelector(pos));
+			menu.AddSeparator("");
+			menu.AddItem(new GUIContent("Category"), false, () => CreateNewCategory(pos));
 			menu.ShowAsContext();
 		}
 
-		private void CreateNewCategory() {
+		private void CreateNewCategory(Vector2 mousePosition) {
 			string categoryName = "";
 			ActionPopupWindow.Show(
 				null,
@@ -202,7 +205,7 @@ namespace MaxyGames.UNode.Editors {
 						ActionPopupWindow.CloseLast();
 					}
 				}
-			);
+			).ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
 		private void RemoveSelectedCategory() {
@@ -896,8 +899,8 @@ namespace MaxyGames.UNode.Editors {
 			if(member is MethodInfo method && method.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false))
 				return EditorReflectionUtility.GetPrettyExtensionMethodName(method);
 			if(uNodePreference.preferenceData.coloredItem)
-				return NodeBrowser.GetRichMemberName(member);
-			return NodeBrowser.GetPrettyMemberName(member);
+				return EditorReflectionUtility.GetRichMemberName(member);
+			return EditorReflectionUtility.GetPrettyMemberName(member);
 		}
 
 		/// <summary>Plain (markup-free) row title, safe for highlight span math.</summary>
@@ -1010,28 +1013,15 @@ namespace MaxyGames.UNode.Editors {
 			// ── Toolbar ──
 			toolbar = new Toolbar();
 
-			categoryDropdown = new DropdownField("Category", new List<string>(), 0) { style = { width = 160 } };
+			categoryDropdown = new DropdownField("Category", new List<string>(), 0) { style = { flexGrow = 1 } };
 			categoryDropdown.RegisterValueChangedCallback(OnCategoryChanged);
 			toolbar.Add(categoryDropdown);
-
-			// Category add/remove
-			var addCategoryBtn = new ToolbarButton(() => CreateNewCategory()) { text = "+", tooltip = "New Category" };
-			addCategoryBtn.style.width = 24;
-			addCategoryBtn.style.marginLeft = 2;
-			toolbar.Add(addCategoryBtn);
-
-			var removeCategoryBtn = new ToolbarButton(() => RemoveSelectedCategory()) { text = "-", tooltip = "Remove Category" };
-			removeCategoryBtn.style.width = 24;
-			toolbar.Add(removeCategoryBtn);
 
 			toolbar.Add(new ToolbarSpacer());
 
 			// Combined add button with dropdown menu
 			var addMenu = new ToolbarButton(ShowAddMenu) { text = "+ Add", tooltip = "Add Item" };
 			toolbar.Add(addMenu);
-
-			removeButton = new ToolbarButton(() => RemoveSelected()) { text = "Remove", tooltip = "Remove selected" };
-			toolbar.Add(removeButton);
 
 			addMembersButton = new ToolbarButton(() => OpenAddMembersPopup()) { text = "+ Members", tooltip = "Add sub-members" };
 			addMembersButton.SetEnabled(false);
@@ -1225,9 +1215,9 @@ namespace MaxyGames.UNode.Editors {
 
 			// Blank-area context menu (row menus stop propagation so this doesn't double up).
 			entryTreeView.AddManipulator(new ContextualMenuManipulator(evt => {
-				evt.menu.AppendAction("New Folder", _ => CreateNewFolder());
-				evt.menu.AppendAction("Add Namespace", _ => AddNamespaceFavorite());
-				evt.menu.AppendAction("Add Type / Member", _ => OpenItemSelector());
+				evt.menu.AppendAction("New Folder", e => CreateNewFolder(e.eventInfo.mousePosition));
+				evt.menu.AppendAction("Add Namespace", e => AddNamespaceFavorite(e.eventInfo.mousePosition));
+				evt.menu.AppendAction("Add Type / Member", e => OpenItemSelector(e.eventInfo.mousePosition));
 			}));
 			root.Add(entryTreeView);
 
@@ -1250,10 +1240,10 @@ namespace MaxyGames.UNode.Editors {
 			};
 			detailNameLabel = new Label("No selection") { style = { unityFontStyleAndWeight = FontStyle.Bold } };
 			detailTypeLabel = new Label("") { style = { marginTop = 2, color = new Color(.6f, .6f, .6f) } };
-			memberScroll = new ScrollView(ScrollViewMode.Vertical) { style = { marginTop = 4, maxHeight = 150 } };
+			detailScroll = new ScrollView(ScrollViewMode.Vertical) { style = { marginTop = 4, maxHeight = 150 } };
 			detailArea.Add(detailNameLabel);
 			detailArea.Add(detailTypeLabel);
-			detailArea.Add(memberScroll);
+			detailArea.Add(detailScroll);
 			root.Add(detailArea);
 
 			rootVisualElement.Add(root);
@@ -1324,7 +1314,7 @@ namespace MaxyGames.UNode.Editors {
 
 			switch(e.kind) {
 				case FavoriteKind.Folder:
-					evt.menu.AppendAction("New Folder", _ => { selectedEntry = de; UpdateDetailPanel(); CreateNewFolder(); });
+					evt.menu.AppendAction("New Folder", e => { selectedEntry = de; UpdateDetailPanel(); CreateNewFolder(e.eventInfo.mousePosition); });
 					evt.menu.AppendAction("Rename", _ => { selectedEntry = de; RenameSelectedFolder(); });
 					break;
 				case FavoriteKind.Type:
@@ -1354,48 +1344,22 @@ namespace MaxyGames.UNode.Editors {
 			if(selectedEntry == null) {
 				detailNameLabel.text = "No selection";
 				detailTypeLabel.text = "";
-				memberScroll.Clear();
+				detailScroll.Clear();
 				return;
 			}
 			var e = selectedEntry.entry;
 			detailNameLabel.text = GetDisplayName(e);
 			detailTypeLabel.text = e.kind + (e.kind == FavoriteKind.Namespace ? "  —  " + e.displayName : e.kind == FavoriteKind.Type || e.kind == FavoriteKind.Node ? "  —  " + e.typeName : "");
 
-			memberScroll.Clear();
-			// Show member toggles for type entries.
-			if(e.kind == FavoriteKind.Type && !e.isVirtual) {
-				var type = e.resolvedType;
-				if(type != null) {
-					var members = type.GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-					Array.Sort(members, (a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
-					bool has = false;
-					foreach(var m in members) {
-						if(m is EventInfo) continue;
-						if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
-						has = true;
-						bool isExcluded = e.excludedMembers.Contains(m.Name);
-						var row = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center, marginTop = 1, marginBottom = 1 } };
-						var toggle = new Toggle(m.Name) { value = !isExcluded, style = { flexGrow = 1 } };
-						bool captured = isExcluded;
-						toggle.RegisterValueChangedCallback(evt => {
-							if(evt.newValue) e.excludedMembers.Remove(m.Name);
-							else if(!e.excludedMembers.Contains(m.Name)) e.excludedMembers.Add(m.Name);
-							FavoritesManager.Save();
-						});
-						row.Add(toggle);
-						memberScroll.Add(row);
-					}
-					if(!has)
-						memberScroll.Add(new Label("No public members") { style = { color = new Color(.5f, .5f, .5f) } });
-				}
-			}
+			detailScroll.Clear();
+			// TODO: add summary for selections
 		}
 
 		// ═══════════════════════════════════════
 		//  Actions
 		// ═══════════════════════════════════════
 
-		void CreateNewFolder() {
+		void CreateNewFolder(Vector2 mousePosition) {
 			string folderName = "";
 			string parentID = selectedEntry != null && (selectedEntry.entry.kind == FavoriteKind.Folder || selectedEntry.entry.kind == FavoriteKind.Namespace)
 				? selectedEntry.entry.id : null;
@@ -1407,10 +1371,10 @@ namespace MaxyGames.UNode.Editors {
 					ReloadTreeView();
 					ActionPopupWindow.CloseLast();
 				}
-			});
+			}).ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
-		void AddNamespaceFavorite() {
+		void AddNamespaceFavorite(Vector2 mousePosition) {
 			string ns = "";
 			string parentID = selectedEntry != null && selectedEntry.entry.kind == FavoriteKind.Folder
 				? selectedEntry.entry.id : null;
@@ -1422,10 +1386,10 @@ namespace MaxyGames.UNode.Editors {
 					ReloadTreeView();
 					ActionPopupWindow.CloseLast();
 				}
-			});
+			}).ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
-		void OpenItemSelector() {
+		void OpenItemSelector(Vector2 mousePosition) {
 			var graphEditor = uNodeEditor.window?.graphEditor;
 			var filter = new FilterAttribute {
 				Public = true, Instance = true, Static = true,
@@ -1435,7 +1399,7 @@ namespace MaxyGames.UNode.Editors {
 				graphEditor != null ? graphEditor.graphData.graph : null,
 				filter,
 				(MemberData value) => AddMemberDataAsFavorite(value)
-			);
+			).ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
 		void AddMemberDataAsFavorite(MemberData memberData) {
@@ -1500,16 +1464,15 @@ namespace MaxyGames.UNode.Editors {
 			var type = e.resolvedType;
 			if(type == null) return;
 
-			var validMembers = type.GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
-				.Where(m => m is not EventInfo && !(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6))
-				.OrderBy(m => m.Name).ToList();
+			var validMembers = EditorReflectionUtility.GetSortedMembers(type, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+				.Where(m => m is not MethodInfo || m.Name.StartsWith("get_") == false && m.Name.StartsWith("set_") == false).ToArray();
 
-			if(validMembers.Count == 0) {
+			if(validMembers.Length == 0) {
 				EditorUtility.DisplayDialog("No Members", "This type has no public members.", "OK");
 				return;
 			}
 
-			ActionPopupWindow.Show(null, (ref object obj) => {
+			ActionPopupWindow.Show(() => {
 				EditorGUILayout.LabelField("Members of " + GetDisplayName(e), EditorStyles.boldLabel);
 				EditorGUILayout.Space(4);
 				EditorGUILayout.BeginHorizontal();
@@ -1523,10 +1486,10 @@ namespace MaxyGames.UNode.Editors {
 				EditorGUILayout.Space(4);
 				foreach(var m in validMembers) {
 					bool current = FindChildMemberEntry(e.id, m) != null;
-					bool updated = EditorGUILayout.ToggleLeft(m.Name + "  :  " + m.MemberType, current);
+					bool updated = EditorGUILayout.ToggleLeft(EditorReflectionUtility.GetPrettyMemberName(m), current);
 					if(updated != current) SetMemberFavorite(e, m, updated);
 				}
-			}, null, (ref object obj) => { if(GUILayout.Button("Close")) ActionPopupWindow.CloseLast(); });
+			}).ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
 		}
 
 		void SetMemberFavorite(FavoritesDataAsset.Entry typeEntry, MemberInfo member, bool value) {

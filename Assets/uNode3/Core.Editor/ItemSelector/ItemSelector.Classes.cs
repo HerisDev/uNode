@@ -856,10 +856,10 @@ namespace MaxyGames.UNode.Editors {
 						}
 						if(member != null) {
 							if(uNodePreference.preferenceData.coloredItem) {
-								return NodeBrowser.GetRichMemberName(member);
+								return EditorReflectionUtility.GetRichMemberName(member);
 							}
 							else {
-								return NodeBrowser.GetPrettyMemberName(member);
+								return EditorReflectionUtility.GetPrettyMemberName(member);
 							}
 						}
 					}

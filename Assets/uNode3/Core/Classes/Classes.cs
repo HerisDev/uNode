@@ -1247,11 +1247,7 @@ namespace MaxyGames.UNode {
 
 		public override object ReferenceValue {
 			get {
-				var half = aliveHalf;
-				if(half != null)
-					return half;
-				//Every asset is gone but the class may still exist compiled.
-				return string.IsNullOrEmpty(_typeName) ? null : _typeName.ToType(false);
+				return ResolveType();
 			}
 		}
 	}

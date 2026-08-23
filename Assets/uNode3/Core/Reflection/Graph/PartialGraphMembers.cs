@@ -74,7 +74,7 @@ namespace MaxyGames.UNode {
 	/// <summary>
 	/// The seam between the runtime reflection types (this assembly) and the other half of a
 	/// `partial` graph. Two views are available: <see cref="Get"/> for the syntax-scanned
-	/// member descriptions (editor-provided), and <see cref="GetOtherHalfType"/> for the real
+	/// member descriptions (editor-provided), and <see cref="GetCompiledType"/> for the real
 	/// compiled CLR type behind the class, resolved by full name right here so editor and
 	/// builds behave identically.
 	/// </summary>
@@ -164,29 +164,26 @@ namespace MaxyGames.UNode {
 		/// Memoises full-name resolutions. A domain reload clears it, which is exactly when
 		/// assemblies change; renames mid-session simply orphan the old key.
 		/// </summary>
-		private static readonly Dictionary<string, Type> s_halfTypeCache = new Dictionary<string, Type>();
+		private static readonly Dictionary<string, Type> s_CLRTypeCache = new Dictionary<string, Type>();
 
 		/// <summary>
 		/// The real CLR type behind a `partial` graph class, or null when nothing compiled
 		/// carries that name yet (a normal state: being `partial` requires no other half).
 		/// Resolution is by full name only, identical in editor and builds: the hand-written
 		/// half and the generated merged class both compile with the project, so whichever
-		/// exists is reachable through plain reflection. A resolved uNode runtime wrapper is
-		/// rejected, since that would be another graph's type rather than a hand-written one.
+		/// exists is reachable through plain reflection. 
 		/// </summary>
-		public static Type GetOtherHalfType(GraphAsset graph) {
+		public static Type GetCompiledType(GraphAsset graph) {
 			if(graph == null)
 				return null;
 			try {
 				var modifier = graph as IClassModifier;
 				if(modifier == null || modifier.GetModifier()?.Partial == false)
 					return null;
-				var name = graph.GetGraphName();
-				if(string.IsNullOrEmpty(name))
+				var fullName = graph.GetFullGraphName();
+				if(string.IsNullOrEmpty(fullName))
 					return null;
-				var ns = graph.GetGraphNamespace() ?? string.Empty;
-				var fullName = string.IsNullOrEmpty(ns) ? name : ns + "." + name;
-				if(s_halfTypeCache.TryGetValue(fullName, out var cached)) {
+				if(s_CLRTypeCache.TryGetValue(fullName, out var cached)) {
 					return cached;
 				}
 				var compiled = fullName.ToType(false);
@@ -195,7 +192,7 @@ namespace MaxyGames.UNode {
 				if(compiled is RuntimeType) {
 					compiled = null;
 				}
-				s_halfTypeCache[fullName] = compiled;
+				s_CLRTypeCache[fullName] = compiled;
 				return compiled;
 			}
 			catch(Exception ex) {
