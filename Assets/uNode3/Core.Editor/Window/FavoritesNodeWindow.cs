@@ -117,6 +117,28 @@ namespace MaxyGames.UNode.Editors {
 
 		const string kLastCategoryKey = "uNode.FavoritesWindow.Category";
 
+		/// <summary>
+		/// Explicit parent entry id for the next item added via a context/menu action
+		/// (captured when the menu opens, consumed by the add methods). Null = category root.
+		/// </summary>
+		string pendingParentID;
+
+		void SetPendingParent(FavoritesDataAsset.Entry owner) {
+			pendingParentID = owner != null ? owner.id : null;
+		}
+
+		/// <summary>
+		/// Consumes the pending parent (menu intent) or falls back to the current
+		/// selection when it satisfies the given parent kinds. Clears the intent.
+		/// </summary>
+		string ResolveIntentParent(Func<FavoritesDataAsset.Entry, bool> validParentKinds) {
+			var pid = pendingParentID;
+			pendingParentID = null;
+			if(pid == null && selectedEntry != null && selectedEntry.entry != null && validParentKinds(selectedEntry.entry))
+				return selectedEntry.entry.id;
+			return pid;
+		}
+
 		string RestoreLastCategory() {
 			var cats = FavoritesManager.GetCategories();
 			string saved = SessionState.GetString(kLastCategoryKey, string.Empty);
@@ -198,6 +220,7 @@ namespace MaxyGames.UNode.Editors {
 		void ShowAddMenu() {
 			var menu = new GenericMenu();
 			var pos = Event.current.mousePosition;
+			SetPendingParent(null); // toolbar adds land at the category root
 			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder(pos));
 			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite(pos));
 			menu.AddItem(new GUIContent("Type or Member"), false, () => OpenItemSelector(pos));
@@ -1121,7 +1144,7 @@ namespace MaxyGames.UNode.Editors {
 			var addMenu = new ToolbarButton(ShowAddMenu) { text = "+ Add", tooltip = "Add Item" };
 			toolbar.Add(addMenu);
 
-			addMembersButton = new ToolbarButton(() => OpenAddMembersPopup()) { text = "+ Members", tooltip = "Add Members (type) / Types (namespace)" };
+			addMembersButton = new ToolbarButton(() => OpenAddMembersPopup(Event.current.mousePosition)) { text = "+ Members", tooltip = "Add Members (type) / Types (namespace)" };
 			addMembersButton.SetEnabled(false);
 			toolbar.Add(addMembersButton);
 
@@ -1323,9 +1346,9 @@ namespace MaxyGames.UNode.Editors {
 
 			// Blank-area context menu (row menus stop propagation so this doesn't double up).
 			entryTreeView.AddManipulator(new ContextualMenuManipulator(evt => {
-				evt.menu.AppendAction("New Folder", a => CreateNewFolder(a.eventInfo.mousePosition));
-				evt.menu.AppendAction("Add Namespace", a => AddNamespaceFavorite(a.eventInfo.mousePosition));
-				evt.menu.AppendAction("Add Type / Member", a => OpenItemSelector(a.eventInfo.mousePosition));
+				evt.menu.AppendAction("New Folder", a => { SetPendingParent(null); CreateNewFolder(a.eventInfo.mousePosition); });
+				evt.menu.AppendAction("Add Namespace", a => { SetPendingParent(null); AddNamespaceFavorite(a.eventInfo.mousePosition); });
+				evt.menu.AppendAction("Add Type / Member", a => { SetPendingParent(null); OpenItemSelector(a.eventInfo.mousePosition); });
 			}));
 			// Last-chance snapshot when the tree detaches (window closing).
 			entryTreeView.RegisterCallback<DetachFromPanelEvent>(_ => SnapshotExpandedState());
@@ -1492,15 +1515,18 @@ namespace MaxyGames.UNode.Editors {
 
 			switch(e.kind) {
 				case FavoriteKind.Folder:
-					evt.menu.AppendAction("New Folder", e => { selectedEntry = de; UpdateDetailPanel(); CreateNewFolder(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("New Folder", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); CreateNewFolder(e.eventInfo.mousePosition); });
 					evt.menu.AppendAction("Rename", _ => { selectedEntry = de; RenameSelectedFolder(); });
+					evt.menu.AppendSeparator();
+					evt.menu.AppendAction("Add Namespace", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); AddNamespaceFavorite(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Type / Member", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(e.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Type:
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
-					evt.menu.AppendAction("Add Members...", _ => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(); });
+					evt.menu.AppendAction("Add Members...", e => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(e.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Namespace:
-					evt.menu.AppendAction("Add Types...", _ => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(); });
+					evt.menu.AppendAction("Add Types...", e => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(e.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Node:
 				case FavoriteKind.Member:
@@ -1680,8 +1706,7 @@ namespace MaxyGames.UNode.Editors {
 
 		void CreateNewFolder(Vector2 mousePosition) {
 			string folderName = "";
-			string parentID = selectedEntry != null && (selectedEntry.entry.kind == FavoriteKind.Folder || selectedEntry.entry.kind == FavoriteKind.Namespace)
-				? selectedEntry.entry.id : null;
+			string parentID = ResolveIntentParent(x => x.kind == FavoriteKind.Folder || x.kind == FavoriteKind.Namespace);
 			ActionPopupWindow.Show(null, (ref object obj) => {
 				EditorGUILayout.LabelField("New Folder", EditorStyles.boldLabel);
 				folderName = EditorGUILayout.TextField("Name", folderName);
@@ -1695,8 +1720,7 @@ namespace MaxyGames.UNode.Editors {
 
 		void AddNamespaceFavorite(Vector2 mousePosition) {
 			string ns = "";
-			string parentID = selectedEntry != null && selectedEntry.entry.kind == FavoriteKind.Folder
-				? selectedEntry.entry.id : null;
+			string parentID = ResolveIntentParent(x => x.kind == FavoriteKind.Folder);
 			ActionPopupWindow.Show(null, (ref object obj) => {
 				EditorGUILayout.LabelField("Add Namespace", EditorStyles.boldLabel);
 				ns = EditorGUILayout.TextField("Namespace", ns);
@@ -1729,8 +1753,7 @@ namespace MaxyGames.UNode.Editors {
 				|| memberData.targetType == MemberData.TargetType.uNodeType
 				|| memberData.targetType == MemberData.TargetType.Values;
 
-			string parentID = selectedEntry != null && (selectedEntry.entry.kind == FavoriteKind.Folder || selectedEntry.entry.kind == FavoriteKind.Namespace)
-				? selectedEntry.entry.id : null;
+			string parentID = ResolveIntentParent(x => x.kind == FavoriteKind.Folder || x.kind == FavoriteKind.Namespace);
 
 			if(isType) {
 				var type = memberData.startType ?? memberData.type ?? memberData.StartSerializedType.type;
@@ -1861,12 +1884,12 @@ namespace MaxyGames.UNode.Editors {
 			UpdateAddMembersButton();
 		}
 
-		void OpenAddMembersPopup() {
+		void OpenAddMembersPopup(Vector2 mousePosition) {
 			if(selectedEntry == null || selectedEntry.isVirtualChild) return;
 			// Namespace favorites manage their generated TYPE list instead.
 			if(selectedEntry.entry.kind == FavoriteKind.Namespace) {
 				ActionPopupWindow.Show(() => BuildNamespaceTypesUI(selectedEntry.entry))
-					.ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
+					.ChangePosition(this.GetMousePositionForMenu(mousePosition));
 				return;
 			}
 			if(selectedEntry.entry.kind != FavoriteKind.Type) return;
