@@ -535,6 +535,110 @@ namespace MaxyGames.UNode.Editors {
 		}
 		#endregion
 
+		#region Reflection Cache
+		static readonly object s_CacheLock = new object();
+		// Namespace string → reflected types (unfiltered).
+		static readonly Dictionary<string, Type[]> s_NsTypesCache = new Dictionary<string, Type[]>();
+		// Type → reflected members (unfiltered).
+		static readonly Dictionary<Type, MemberInfo[]> s_MembersCache = new Dictionary<Type, MemberInfo[]>();
+
+		/// <summary>
+		/// Reflected types of a namespace (unfiltered, cached). Safe cross-thread;
+		/// returned arrays are immutable snapshots.
+		/// </summary>
+		public static Type[] GetNamespaceTypesRaw(string @namespace) {
+			if(string.IsNullOrEmpty(@namespace))
+				return Type.EmptyTypes;
+			lock(s_CacheLock) {
+				if(s_NsTypesCache.TryGetValue(@namespace, out var cached))
+					return cached;
+			}
+			var list = new List<Type>();
+			foreach(var asm in AppDomain.CurrentDomain.GetAssemblies()) {
+				Type[] types;
+				try { types = asm.GetTypes(); }
+				catch { continue; }
+				foreach(var t in types) {
+					if(t == null || t.IsNested || t.Namespace != @namespace) continue;
+					if(t.IsSpecialName || t.Name.Contains('<') || t.Name.StartsWith("__")) continue;
+					list.Add(t);
+				}
+			}
+			var arr = list.ToArray();
+			lock(s_CacheLock) {
+				s_NsTypesCache[@namespace] = arr;
+			}
+			return arr;
+		}
+
+		/// <summary>Reflected members of a type (unfiltered, cached).</summary>
+		public static MemberInfo[] GetMembersRaw(Type type) {
+			if(type == null)
+				return Array.Empty<MemberInfo>();
+			lock(s_CacheLock) {
+				if(s_MembersCache.TryGetValue(type, out var cached))
+					return cached;
+			}
+			MemberInfo[] members;
+			try {
+				members = type.GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+			}
+			catch {
+				members = Array.Empty<MemberInfo>();
+			}
+			lock(s_CacheLock) {
+				s_MembersCache[type] = members;
+			}
+			return members;
+		}
+
+		/// <summary>
+		/// True when raw reflection results for this owner are already cached
+		/// (its generated children can be built instantly).
+		/// </summary>
+		public static bool HasRawCache(FavoritesDataAsset.FavoriteEntry owner) {
+			if(owner == null) return false;
+			lock(s_CacheLock) {
+				if(owner.kind == FavoriteKind.Namespace)
+					return s_NsTypesCache.ContainsKey(owner.displayName);
+				if(owner.kind == FavoriteKind.Type) {
+					Type t = null;
+					try { t = owner.resolvedType; } catch { }
+					return t != null && s_MembersCache.ContainsKey(t);
+				}
+			}
+			return false;
+		}
+
+		/// <summary>
+		/// Populates the raw reflection caches for this owner
+		/// (namespace types or type members). Thread-safe.
+		/// </summary>
+		public static void WarmReflectionCache(FavoritesDataAsset.FavoriteEntry owner) {
+			if(owner == null) return;
+			switch(owner.kind) {
+				case FavoriteKind.Namespace:
+					GetNamespaceTypesRaw(owner.displayName);
+					break;
+				case FavoriteKind.Type: {
+					Type t = null;
+					try { t = owner.resolvedType; } catch { }
+					if(t != null)
+						GetMembersRaw(t);
+					break;
+				}
+			}
+		}
+
+		/// <summary>Drops all cached reflection results (e.g. on domain reload).</summary>
+		public static void ClearReflectionCache() {
+			lock(s_CacheLock) {
+				s_NsTypesCache.Clear();
+				s_MembersCache.Clear();
+			}
+		}
+		#endregion
+
 		#region Virtual Generation
 		/// <summary>
 		/// Resolve the reflected MemberInfo of a member entry. Virtual entries
@@ -556,25 +660,18 @@ namespace MaxyGames.UNode.Editors {
 			var result = new List<FavoritesDataAsset.FavoriteEntry>();
 			if(nsEntry == null || string.IsNullOrEmpty(nsEntry.displayName))
 				return result;
-			foreach(var asm in AppDomain.CurrentDomain.GetAssemblies()) {
-				Type[] types;
-				try { types = asm.GetTypes(); }
-				catch { continue; }
-				foreach(var t in types) {
-					if(t == null || t.IsNested || t.Namespace != nsEntry.displayName) continue;
-					if(t.IsSpecialName || t.Name.Contains('<') || t.Name.StartsWith("__")) continue;
-					if(!ignoreVisibility && !IsTypeNameVisibleIn(nsEntry, t.Name))
-						continue;
-					result.Add(new FavoritesDataAsset.FavoriteEntry {
-						id = "[ns]:" + t.AssemblyQualifiedName,
-						kind = FavoriteKind.Type,
-						targetType = new SerializedType(t),
-						isVirtual = true,
-						displayName = t.Name,
-						ownerEntry = nsEntry,
-						parentEntry = nsEntry,
-					});
-				}
+			foreach(var t in GetNamespaceTypesRaw(nsEntry.displayName)) {
+				if(!ignoreVisibility && !IsTypeNameVisibleIn(nsEntry, t.Name))
+					continue;
+				result.Add(new FavoritesDataAsset.FavoriteEntry {
+					id = "[ns]:" + t.AssemblyQualifiedName,
+					kind = FavoriteKind.Type,
+					targetType = new SerializedType(t),
+					isVirtual = true,
+					displayName = t.Name,
+					ownerEntry = nsEntry,
+					parentEntry = nsEntry,
+				});
 			}
 			result.Sort((a, b) => string.Compare(a.targetType.type.FullName, b.targetType.type.FullName, StringComparison.OrdinalIgnoreCase));
 			return result;
@@ -592,15 +689,8 @@ namespace MaxyGames.UNode.Editors {
 			try { type = typeEntry.resolvedType; } catch { }
 			if(type == null || type.IsEnum)
 				return result;
-			MemberInfo[] members;
-			try {
-				members = type.GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-			}
-			catch {
-				return result;
-			}
 			string declName = type.FullName ?? type.Name;
-			foreach(var m in members) {
+			foreach(var m in GetMembersRaw(type)) {
 				if(m is EventInfo) continue;
 				if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
 				if(IsAccessorMethod(m)) continue;

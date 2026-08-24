@@ -39,16 +39,28 @@ namespace MaxyGames.UNode.Editors {
 		private CancellationTokenSource _searchCts;
 		private int _searchGeneration;
 
-		static readonly BindingFlags s_DeepMemberFlags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+		// ── Background warming ──
+		bool _warming;              // a background reflection warm-up is running
 
 		class DisplayEntry {
 			public int treeID;
 			public FavoritesDataAsset.FavoriteEntry entry;
 			public bool isVirtualChild;
+			public bool isPlaceholder;  // lazily-loaded stand-in row ("…") keeping the foldout arrow
 			public List<DisplayEntry> children;
 			public int memberCount;
 			public float searchScore;   // relevance score (search mode only)
 			public string searchPath;   // breadcrumb path shown under the title in search mode
+		}
+
+		/// <summary>Transient marker entry backing a placeholder row.</summary>
+		static FavoritesDataAsset.FavoriteEntry CreateLoadingMarker(FavoritesDataAsset.FavoriteEntry owner) {
+			return new FavoritesDataAsset.FavoriteEntry {
+				id = "[loading]:" + owner.id,
+				kind = FavoriteKind.Member,
+				isVirtual = true,
+				displayName = "…",
+			};
 		}
 
 		/// <summary>
@@ -73,10 +85,8 @@ namespace MaxyGames.UNode.Editors {
 			public List<VisibleRow> rows = new List<VisibleRow>();
 		}
 
-		/// <summary>
-		/// Stable TreeView id derived from the entry id, so expansion state
-		/// survives rebuilds and sessions (sequential ids would reshuffle).
-		/// </summary>
+		/// <summary>Stable TreeView id derived from the entry id, so expansion state
+		/// survives rebuilds and sessions (sequential ids would reshuffle).</summary>
 		static int GetStableTreeID(FavoritesDataAsset.FavoriteEntry e) {
 			int id = e.id?.GetHashCode() ?? 0;
 			if(id == 0)
@@ -108,6 +118,8 @@ namespace MaxyGames.UNode.Editors {
 			window = this;
 			BuildNodeMenuCache();
 			FavoritesManager.onChanged += OnFavoritesChanged;
+			// Raw reflection caches depend only on loaded assemblies → reset per session.
+			FavoritesManager.ClearReflectionCache();
 			currentCategoryID = RestoreLastCategory();
 			BuildUI();
 			ReloadTreeView();
@@ -192,7 +204,6 @@ namespace MaxyGames.UNode.Editors {
 		private void OnFavoritesChanged() {
 			ReloadTreeView();
 		}
-
 		// ═══════════════════════════════════════
 		//  Category
 		// ═══════════════════════════════════════
@@ -332,35 +343,55 @@ namespace MaxyGames.UNode.Editors {
 						? BuildChildren(entry, entry.children, depth + 1, inNamespace)
 						: new List<TreeViewItemData<DisplayEntry>>();
 
-					// For namespace entries, append virtual type children (not reorderable).
-					if(entry.kind == FavoriteKind.Namespace && !entry.isVirtual && !inNamespace) {
-						var virtualChildren = FavoritesManager.GetVirtualNamespaceChildren(entry);
-						foreach(var vc in virtualChildren) {
-							int vID = AssignStableTreeID(vc, treeIDMap);
-							var vde = new DisplayEntry {
-								treeID = vID,
-								entry = vc,
-								isVirtualChild = true,
-								memberCount = 0,
-							};
-							treeIDMap[vID] = vde;
-							childItems.Add(new TreeViewItemData<DisplayEntry>(vID, vde));
+					// For namespace/type entries, append ALL virtual children — they
+					// always exist in the tree data. Generation reads the shared
+					// reflection cache (instant once warmed); cold owners show a
+					// temporary "…" placeholder and are warmed off-thread.
+					bool isVirtualSource =
+						(entry.kind == FavoriteKind.Namespace ||
+						 (entry.kind == FavoriteKind.Type && !entry.isVirtual)) && !inNamespace;
+					if(isVirtualSource) {
+						if(FavoritesManager.HasRawCache(entry)) {
+							if(entry.kind == FavoriteKind.Namespace) {
+								foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(entry)) {
+									int vID = AssignStableTreeID(vc, treeIDMap);
+									var vde = new DisplayEntry {
+										treeID = vID,
+										entry = vc,
+										isVirtualChild = true,
+										memberCount = 0,
+									};
+									treeIDMap[vID] = vde;
+									childItems.Add(new TreeViewItemData<DisplayEntry>(vID, vde));
+								}
+							}
+							else {
+								foreach(var vm in FavoritesManager.GetVirtualTypeMembers(entry)) {
+									int vID = AssignStableTreeID(vm, treeIDMap);
+									var vde = new DisplayEntry {
+										treeID = vID,
+										entry = vm,
+										isVirtualChild = true,
+										memberCount = 0,
+									};
+									treeIDMap[vID] = vde;
+									childItems.Add(new TreeViewItemData<DisplayEntry>(vID, vde));
+								}
+							}
 						}
-					}
-
-					// For type entries, append virtual member children — members are
-					// bound to their type and never persisted (excludedMembers hides them).
-					if(entry.kind == FavoriteKind.Type && !entry.isVirtual && !inNamespace) {
-						foreach(var vm in FavoritesManager.GetVirtualTypeMembers(entry)) {
-							int vID = AssignStableTreeID(vm, treeIDMap);
-							var vde = new DisplayEntry {
-								treeID = vID,
-								entry = vm,
+						else {
+							// Cold reflection cache: placeholder keeps the foldout arrow;
+							// the background warmer fills it and reloads when done.
+							var marker = CreateLoadingMarker(entry);
+							int pID = AssignStableTreeID(marker, treeIDMap);
+							var ph = new DisplayEntry {
+								treeID = pID,
+								entry = marker,
 								isVirtualChild = true,
-								memberCount = 0,
+								isPlaceholder = true,
 							};
-							treeIDMap[vID] = vde;
-							childItems.Add(new TreeViewItemData<DisplayEntry>(vID, vde));
+							treeIDMap[pID] = ph;
+							childItems.Add(new TreeViewItemData<DisplayEntry>(pID, ph));
 						}
 					}
 
@@ -417,7 +448,7 @@ namespace MaxyGames.UNode.Editors {
 				if(type == null || type.IsEnum || searchString.Length < ItemSelector.MinWordForDeepTypeSearch)
 					return;
 				MemberInfo[] members;
-				try { members = type.GetMembers(s_DeepMemberFlags); }
+				try { members = FavoritesManager.GetMembersRaw(type); }
 				catch { return; }
 				foreach(var m in members) {
 					if(m is EventInfo) continue;
@@ -751,7 +782,7 @@ namespace MaxyGames.UNode.Editors {
 					return;
 				token.ThrowIfCancellationRequested();
 				MemberInfo[] members;
-				try { members = type.GetMembers(s_DeepMemberFlags); }
+				try { members = FavoritesManager.GetMembersRaw(type); }
 				catch { return; }
 				string declName = type.FullName ?? type.Name;
 				foreach(var m in members) {
@@ -794,29 +825,35 @@ namespace MaxyGames.UNode.Editors {
 						foreach(var c in ChildrenOf(item.entry))
 							CollectEntry(c, nsPath);
 						// Virtual types of the namespace are searchable candidates.
-						// Safe off-thread: pure reflection over loaded assemblies.
-						// Namespace visibility mode applies.
-						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(item.entry)) {
+						// Uses the shared reflection cache; wrapper entries are built
+						// only for MATCHES to keep per-keystroke allocations tiny.
+						foreach(var t in FavoritesManager.GetNamespaceTypesRaw(item.displayName)) {
 							token.ThrowIfCancellationRequested();
-							Type t = null;
 							float score = -1f;
 							try {
-								t = vc.targetType?.type;
 								score = Math.Max(
-									ItemSelector.GetRelevanceScore(query, t?.Name ?? vc.displayName),
-									t == null ? -1f : ItemSelector.GetRelevanceScore(query, t.FullName));
+									ItemSelector.GetRelevanceScore(query, t.Name),
+									ItemSelector.GetRelevanceScore(query, t.FullName));
 							} catch { }
 							if(score >= 0f) {
+								var vc = new FavoritesDataAsset.FavoriteEntry {
+									id = "[ns]:" + t.AssemblyQualifiedName,
+									kind = FavoriteKind.Type,
+									targetType = new SerializedType(t),
+									isVirtual = true,
+									displayName = t.Name,
+									ownerEntry = item.entry,
+								};
 								AddResult(new SearchItem {
 									entry = vc,
 									kind = FavoriteKind.Type,
 									isVirtual = true,
-									displayName = vc.targetType?.type?.Name ?? vc.displayName,
+									displayName = t.Name,
 								}, score, nsPath);
 							}
 							// Deep member search inside namespace types too
 							// (null owner → visibility rules don't apply to them).
-							CollectTypeMembers(t, JoinPath(nsPath, t?.Name ?? vc.displayName), null);
+							CollectTypeMembers(t, JoinPath(nsPath, t.Name), null);
 						}
 						break;
 					}
@@ -1203,6 +1240,26 @@ namespace MaxyGames.UNode.Editors {
 					item.value = de.entry;
 					item.userData = de;
 
+					// Lazily-loaded placeholder row: renders as "…" and is inert.
+					if(de.isPlaceholder) {
+						bool phSearch = !string.IsNullOrEmpty(searchString);
+						item.CanDragFunc = () => false;
+						item.CanDragInsideParentFunc = () => false;
+						item.CanHaveChildsFunc = () => false;
+						item.GetDragGenericData = () => null;
+						item.onClick = null;
+						item.style.backgroundColor = Color.clear;
+						item.label.text = "…";
+						item.label.style.opacity = 0.5f;
+						item.ShowIcon(null);
+						var phTypeIcon = item.Q<Image>("type-icon");
+						if(phTypeIcon != null) phTypeIcon.style.display = DisplayStyle.None;
+						var phPathLabel = item.Q<Label>("path-label");
+						if(phPathLabel != null) phPathLabel.style.display = DisplayStyle.None;
+						return;
+					}
+					item.label.style.opacity = 1f;
+
 					// Drag behavior:
 					// - Type & Member rows are graph-draggable (payload key "uNode",
 					//   matching the NodeBrowser/graph contract), including virtual
@@ -1388,6 +1445,36 @@ namespace MaxyGames.UNode.Editors {
 			entryTreeView.Rebuild();
 			ApplyExpandedState();
 			UpdateStatusLabel();
+			// Cold reflection caches → warm them off-thread, then reload once so
+			// placeholder rows swap to their real generated children.
+			KickWarmUp();
+		}
+
+		/// <summary>
+		/// Warms raw reflection caches for every expandable entry of the current
+		/// category that isn't cached yet (off-thread), then reloads the tree once
+		/// complete. No-op while a warm-up is already running or when fully warm.
+		/// </summary>
+		void KickWarmUp() {
+			if(_warming || CurrentCategory == null)
+				return;
+			var targets = FavoritesManager.Flatten(CurrentCategory)
+				.Where(e => (e.kind == FavoriteKind.Namespace ||
+							(e.kind == FavoriteKind.Type && !e.isVirtual)) &&
+						   !FavoritesManager.HasRawCache(e))
+				.ToList();
+			if(targets.Count == 0)
+				return;
+			_warming = true;
+			Task.Run(() => {
+				foreach(var t in targets) {
+					FavoritesManager.WarmReflectionCache(t);
+				}
+			}).ContinueWith(_ => {
+				_warming = false;
+				if(this != null && entryTreeView != null)
+					ReloadTreeView();
+			}, TaskScheduler.FromCurrentSynchronizationContext());
 		}
 
 		/// <summary>
@@ -1426,7 +1513,8 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>Re-expands rows persisted as expanded. Runs after Rebuild.</summary>
-		void ApplyExpandedState() {			if(entryTreeView == null || entryTreeView.panel == null)
+		void ApplyExpandedState() {
+			if(entryTreeView == null || entryTreeView.panel == null)
 				return;
 			if(!string.IsNullOrEmpty(searchString))
 				return;
@@ -1462,7 +1550,7 @@ namespace MaxyGames.UNode.Editors {
 		/// menu on the TreeView doesn't also populate.
 		/// </summary>
 		void BuildRowContextMenu(ContextualMenuPopulateEvent evt, DisplayEntry de) {
-			if(de == null || de.entry == null)
+			if(de == null || de.entry == null || de.isPlaceholder)
 				return;
 			var e = de.entry;
 
@@ -2393,7 +2481,7 @@ namespace MaxyGames.UNode.Editors {
 
 		/// <summary>Double-click/context-menu entry point: validates then spawns the node.</summary>
 		void TryCreateNode(DisplayEntry de) {
-			if(de == null || de.entry == null) return;
+			if(de == null || de.entry == null || de.isPlaceholder) return;
 			var kind = de.entry.kind;
 			if(kind != FavoriteKind.Node && kind != FavoriteKind.Type && kind != FavoriteKind.Member)
 				return;
