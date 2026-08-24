@@ -21,11 +21,10 @@ namespace MaxyGames.UNode.Editors {
 		private ProgressBar searchProgressBar;
 		private TreeView entryTreeView;
 		private Label statusLabel;
-		private VisualElement detailArea;
 		private Label detailNameLabel;
 		private Label detailTypeLabel;
 		private ScrollView detailScroll;
-		private Button removeButton;
+		private VisualElement detailArea;
 		private Button addMembersButton;
 
 		// ── State ──
@@ -40,15 +39,13 @@ namespace MaxyGames.UNode.Editors {
 		private int _searchGeneration;
 
 		// ── Background warming ──
-		bool _warming;              // a background reflection warm-up is running
+		bool _warming;
 
 		class DisplayEntry {
 			public int treeID;
 			public FavoritesDataAsset.FavoriteEntry entry;
 			public bool isVirtualChild;
-			public bool isPlaceholder;  // lazily-loaded stand-in row ("…") keeping the foldout arrow
-			public List<DisplayEntry> children;
-			public int memberCount;
+			public bool isPlaceholder;  // lazily-warmed stand-in row ("…") keeping the foldout arrow
 			public float searchScore;   // relevance score (search mode only)
 			public string searchPath;   // breadcrumb path shown under the title in search mode
 		}
@@ -64,13 +61,12 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
-		/// Main-thread snapshot of one entry: everything the background search needs.
-		/// The worker only reads these plain fields — it never touches Unity
-		/// serialized/native APIs (SerializedType, MemberData, icons).
+		/// Main-thread snapshot of one entry: everything the search needs.
+		/// Only plain fields — never Unity serialized/native APIs.
 		/// </summary>
 		class SearchItem {
-			public FavoritesDataAsset.FavoriteEntry entry;  // managed ref, read-only on worker
-			public FavoritesDataAsset.FavoriteEntry parent; // owning container entry (null = root)
+			public FavoritesDataAsset.FavoriteEntry entry;
+			public FavoritesDataAsset.FavoriteEntry parent; // owning container (null = root)
 			public FavoriteKind kind;
 			public bool isVirtual;
 			public string displayName;      // plain text used for scoring/paths
@@ -78,7 +74,7 @@ namespace MaxyGames.UNode.Editors {
 			public Type resolvedRuntimeType; // captured on the UI thread for deep member search
 		}
 
-		/// <summary>Immutable payload produced by the background search task.</summary>
+		/// <summary>Immutable payload produced by a search run.</summary>
 		class SearchResult {
 			public List<TreeViewItemData<DisplayEntry>> items = new List<TreeViewItemData<DisplayEntry>>();
 			public Dictionary<int, DisplayEntry> treeIDMap = new Dictionary<int, DisplayEntry>();
@@ -111,8 +107,13 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		// ═══════════════════════════════════════
-		//  OnEnable / OnDisable
+		//  Lifecycle / Intent / Category
 		// ═══════════════════════════════════════
+
+		const string kLastCategoryKey = "uNode.FavoritesWindow.Category";
+
+		/// <summary>Parent for the next item added via a menu action. Null = category root.</summary>
+		FavoritesDataAsset.FavoriteEntry pendingParent;
 
 		private void OnEnable() {
 			window = this;
@@ -125,22 +126,20 @@ namespace MaxyGames.UNode.Editors {
 			ReloadTreeView();
 		}
 
-		const string kLastCategoryKey = "uNode.FavoritesWindow.Category";
-
-		/// <summary>
-		/// Explicit parent entry for the next item added via a context/menu action
-		/// (captured when the menu opens, consumed by the add methods). Null = category root.
-		/// </summary>
-		FavoritesDataAsset.FavoriteEntry pendingParent;
+		private void OnDisable() {
+			if(window == this)
+				window = null;
+			try { SnapshotExpandedState(); } catch { }
+			FavoritesManager.onChanged -= OnFavoritesChanged;
+			rootVisualElement?.UnregisterCallback<KeyDownEvent>(OnWindowKeyDown);
+			CancelPendingSearch();
+		}
 
 		void SetPendingParent(FavoritesDataAsset.FavoriteEntry owner) {
 			pendingParent = owner;
 		}
 
-		/// <summary>
-		/// Consumes the pending parent (menu intent) or falls back to the current
-		/// selection when it satisfies the given parent kinds. Clears the intent.
-		/// </summary>
+		/// <summary>Consumes the pending parent or falls back to selection if valid.</summary>
 		FavoritesDataAsset.FavoriteEntry ResolveIntentParent(Func<FavoritesDataAsset.FavoriteEntry, bool> validParentKinds) {
 			var p = pendingParent;
 			pendingParent = null;
@@ -149,7 +148,6 @@ namespace MaxyGames.UNode.Editors {
 			return p;
 		}
 
-		/// <summary>Currently selected category object (by id).</summary>
 		FavoritesDataAsset.FavoriteCategory CurrentCategory {
 			get { return FavoritesManager.GetCategories().FirstOrDefault(c => c.id == currentCategoryID); }
 		}
@@ -166,17 +164,6 @@ namespace MaxyGames.UNode.Editors {
 			SessionState.SetString(kLastCategoryKey, currentCategoryID ?? string.Empty);
 		}
 
-		private void OnDisable() {
-			if(window == this)
-				window = null;
-			// Persist expansion before the panel tears down (best effort).
-			try { SnapshotExpandedState(); } catch { }
-			FavoritesManager.onChanged -= OnFavoritesChanged;
-			rootVisualElement?.UnregisterCallback<KeyDownEvent>(OnWindowKeyDown);
-			// Invalidate any in-flight background search so its apply is rejected.
-			CancelPendingSearch();
-		}
-
 		void CancelPendingSearch() {
 			_searchGeneration++;
 			try { _searchCts?.Cancel(); } catch { }
@@ -189,7 +176,6 @@ namespace MaxyGames.UNode.Editors {
 				return;
 			}
 			if(evt.keyCode == KeyCode.Delete && selectedEntry != null) {
-				// Ignore when typing in the search field.
 				var focused = rootVisualElement.focusController?.focusedElement as VisualElement;
 				while(focused != null) {
 					if(focused == searchField)
@@ -204,9 +190,6 @@ namespace MaxyGames.UNode.Editors {
 		private void OnFavoritesChanged() {
 			ReloadTreeView();
 		}
-		// ═══════════════════════════════════════
-		//  Category
-		// ═══════════════════════════════════════
 
 		private void UpdateCategoryDropdown() {
 			if(categoryDropdown == null) return;
@@ -231,19 +214,6 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		void ShowAddMenu() {
-			var menu = new GenericMenu();
-			var pos = Event.current.mousePosition;
-			SetPendingParent(null); // toolbar adds land at the category root
-			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder(pos));
-			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite(pos));
-			menu.AddItem(new GUIContent("Type or Member"), false, () => OpenItemSelector(pos));
-			menu.AddItem(new GUIContent("Node"), false, () => OpenAddNodePopup(pos));
-			menu.AddSeparator("");
-			menu.AddItem(new GUIContent("Category"), false, () => CreateNewCategory(pos));
-			menu.ShowAsContext();
-		}
-
 		private void CreateNewCategory(Vector2 mousePosition) {
 			string categoryName = "";
 			ActionPopupWindow.Show(
@@ -265,24 +235,17 @@ namespace MaxyGames.UNode.Editors {
 			).ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
-		private void RemoveSelectedCategory() {
-			var cats = FavoritesManager.GetCategories();
-			if(cats.Count <= 1) {
-				EditorUtility.DisplayDialog("Cannot Remove", "At least one category must remain.", "OK");
-				return;
-			}
-			if(!EditorUtility.DisplayDialog("Remove Category", $"Remove category '{cats.FirstOrDefault(c => c.id == currentCategoryID)?.name}' and all its items?", "Yes", "Cancel"))
-				return;
-			string removedID = currentCategoryID;
-			FavoritesManager.RemoveCategory(cats.FirstOrDefault(c => c.id == removedID));
-			// Switch to the first remaining category.
-			var remaining = FavoritesManager.GetCategories();
-			if(remaining.Count > 0) {
-				currentCategoryID = remaining[0].id;
-			}
-			SaveLastCategory();
-			UpdateCategoryDropdown();
-			ReloadTreeView();
+		void ShowAddMenu() {
+			var menu = new GenericMenu();
+			var pos = Event.current.mousePosition;
+			SetPendingParent(null); // toolbar adds land at the category root
+			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder(pos));
+			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite(pos));
+			menu.AddItem(new GUIContent("Type or Member"), false, () => OpenItemSelector(pos));
+			menu.AddItem(new GUIContent("Node"), false, () => OpenAddNodePopup(pos));
+			menu.AddSeparator("");
+			menu.AddItem(new GUIContent("Category"), false, () => CreateNewCategory(pos));
+			menu.ShowAsContext();
 		}
 
 		// ═══════════════════════════════════════
@@ -293,11 +256,9 @@ namespace MaxyGames.UNode.Editors {
 			public FavoritesDataAsset.FavoriteEntry entry;
 			public int depth;          // 0 = root level
 			public FavoritesDataAsset.FavoriteEntry parent; // owning entry (null = root)
-			public bool isLastChild;   // last sibling in its parent (for slot resolution)
 			public bool inNamespace;   // inside a namespace expansion (fixed order)
 		}
 
-		/// <summary>Flat depth-first list of rows currently shown (rebuilt on each reload).</summary>
 		private readonly List<VisibleRow> visibleRows = new List<VisibleRow>();
 
 		private List<TreeViewItemData<DisplayEntry>> BuildTreeData() {
@@ -308,12 +269,9 @@ namespace MaxyGames.UNode.Editors {
 			if(category == null || category.roots.Count == 0)
 				return new List<TreeViewItemData<DisplayEntry>>();
 
-			// Search mode: flatten every matching entry into one relevance-ranked list
-			// (mirrors ItemSelector's SearchKind.Relevant results).
 			if(!string.IsNullOrEmpty(searchString))
-				return BuildFlatSearchRows(category);
+				return RunSearch(category);
 
-			// Recursively build tree items + the flat visible-row list.
 			List<TreeViewItemData<DisplayEntry>> BuildChildren(
 				FavoritesDataAsset.FavoriteEntry parent,
 				List<FavoritesDataAsset.FavoriteEntry> entries, int depth, bool inNamespace) {
@@ -334,7 +292,6 @@ namespace MaxyGames.UNode.Editors {
 							entry = entry,
 							depth = depth,
 							parent = parent,
-							isLastChild = i == entries.Count - 1,
 							inNamespace = inNamespace,
 						});
 					}
@@ -343,57 +300,7 @@ namespace MaxyGames.UNode.Editors {
 						? BuildChildren(entry, entry.children, depth + 1, inNamespace)
 						: new List<TreeViewItemData<DisplayEntry>>();
 
-					// For namespace/type entries, append ALL virtual children — they
-					// always exist in the tree data. Generation reads the shared
-					// reflection cache (instant once warmed); cold owners show a
-					// temporary "…" placeholder and are warmed off-thread.
-					bool isVirtualSource =
-						(entry.kind == FavoriteKind.Namespace ||
-						 (entry.kind == FavoriteKind.Type && !entry.isVirtual)) && !inNamespace;
-					if(isVirtualSource) {
-						if(FavoritesManager.HasRawCache(entry)) {
-							if(entry.kind == FavoriteKind.Namespace) {
-								foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(entry)) {
-									int vID = AssignStableTreeID(vc, treeIDMap);
-									var vde = new DisplayEntry {
-										treeID = vID,
-										entry = vc,
-										isVirtualChild = true,
-										memberCount = 0,
-									};
-									treeIDMap[vID] = vde;
-									childItems.Add(new TreeViewItemData<DisplayEntry>(vID, vde));
-								}
-							}
-							else {
-								foreach(var vm in FavoritesManager.GetVirtualTypeMembers(entry)) {
-									int vID = AssignStableTreeID(vm, treeIDMap);
-									var vde = new DisplayEntry {
-										treeID = vID,
-										entry = vm,
-										isVirtualChild = true,
-										memberCount = 0,
-									};
-									treeIDMap[vID] = vde;
-									childItems.Add(new TreeViewItemData<DisplayEntry>(vID, vde));
-								}
-							}
-						}
-						else {
-							// Cold reflection cache: placeholder keeps the foldout arrow;
-							// the background warmer fills it and reloads when done.
-							var marker = CreateLoadingMarker(entry);
-							int pID = AssignStableTreeID(marker, treeIDMap);
-							var ph = new DisplayEntry {
-								treeID = pID,
-								entry = marker,
-								isVirtualChild = true,
-								isPlaceholder = true,
-							};
-							treeIDMap[pID] = ph;
-							childItems.Add(new TreeViewItemData<DisplayEntry>(pID, ph));
-						}
-					}
+					AppendGeneratedChildren(entry, myID, childItems, inNamespace);
 
 					result.Add(new TreeViewItemData<DisplayEntry>(myID, de, childItems));
 				}
@@ -404,135 +311,45 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
-		/// Builds the flat relevance-ranked search list (mirrors ItemSelector's
-		/// SearchKind.Relevant results): every matching entry is scored via
-		/// ItemSelector's TreeSearcher, sorted by score, and shown without hierarchy.
-		/// Folders/namespaces act as path breadcrumbs rather than rows.
+		/// Appends the generated virtual children of namespace/type entries.
+		/// Reflection reads the shared cache (instant once warmed); cold owners show
+		/// a temporary "…" placeholder that the background warmer swaps out.
 		/// </summary>
-		List<TreeViewItemData<DisplayEntry>> BuildFlatSearchRows(FavoritesDataAsset.FavoriteCategory category) {
-			var results = new List<DisplayEntry>();
+		void AppendGeneratedChildren(FavoritesDataAsset.FavoriteEntry entry, int myID,
+			List<TreeViewItemData<DisplayEntry>> childItems, bool inNamespace) {
+			bool isVirtualSource =
+				(entry.kind == FavoriteKind.Namespace ||
+				 (entry.kind == FavoriteKind.Type && !entry.isVirtual)) && !inNamespace;
+			if(!isVirtualSource)
+				return;
 
-			static string JoinPath(string parentPath, string segment) =>
-				string.IsNullOrEmpty(parentPath) ? segment : parentPath + " > " + segment;
-
-			void AddResult(FavoritesDataAsset.FavoriteEntry e, string path, float? scoreOverride = null) {
-				float score = scoreOverride ?? ScoreSearchTarget(e);
-				if(score < 0f)
-					return; // no relevance match
-				int id = AssignStableTreeID(e, treeIDMap);
-				var de = new DisplayEntry {
-					treeID = id,
-					entry = e,
-					isVirtualChild = e.isVirtual,
-					searchScore = score,
-					searchPath = path ?? string.Empty,
+			if(!FavoritesManager.HasRawCache(entry)) {
+				var marker = CreateLoadingMarker(entry);
+				int pID = AssignStableTreeID(marker, treeIDMap);
+				var ph = new DisplayEntry {
+					treeID = pID,
+					entry = marker,
+					isVirtualChild = true,
+					isPlaceholder = true,
 				};
-				treeIDMap[id] = de;
-				results.Add(de);
-				visibleRows.Add(new VisibleRow {
-					entry = e,
-					depth = 0,
-					parent = null,
-					isLastChild = false,
-					inNamespace = false,
-				});
+				treeIDMap[pID] = ph;
+				childItems.Add(new TreeViewItemData<DisplayEntry>(pID, ph));
+				return;
 			}
 
-			var seenSyncMembers = new HashSet<string>();
-
-			/// Sync fallback of the worker's CollectTypeMembers: surface generated
-			/// members matching the query under their type's path. When the type is
-			/// favorited (ownerType), its mode-aware member visibility is respected;
-			/// null owner (namespace virtual types) searches everything.
-			void CollectTypeMembersSync(Type type, string typePath, FavoritesDataAsset.FavoriteEntry ownerType) {
-				if(type == null || type.IsEnum || searchString.Length < ItemSelector.MinWordForDeepTypeSearch)
-					return;
-				MemberInfo[] members;
-				try { members = FavoritesManager.GetMembersRaw(type); }
-				catch { return; }
-				foreach(var m in members) {
-					if(m is EventInfo) continue;
-					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
-					if(FavoritesManager.IsAccessorMethod(m)) continue;
-					// Respect the owner type's IncludeAll/ExcludeAll visibility.
-					if(!FavoritesManager.IsMemberVisibleIn(ownerType, m))
-						continue;
-					string key = (type.FullName ?? type.Name) + "::" + m.Name + "::" + m.MetadataToken;
-					if(!seenSyncMembers.Add(key)) continue;
-					float score = -1f;
-					var parts = searchString.Split(new[] { '.', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-					if(parts.Length >= 2) {
-						float acc = -1f;
-						for(int i = 1; i < parts.Length; i++) {
-							var s = ItemSelector.GetRelevanceScore(parts[i], m.Name);
-							if(s < 0f) { score = -1f; break; }
-							acc = MathF.Max(acc, s) + (i * 0.1f);
-						}
-						score = acc;
-					} else {
-						score = ItemSelector.GetRelevanceScore(searchString, m.Name);
-					}
-					if(score < 0f) continue;
-					var entry = new FavoritesDataAsset.FavoriteEntry {
-						kind = FavoriteKind.Member,
-						rawMember = m,
-						isVirtual = true,
-						displayName = m.Name,
-						id = "[deep]:" + key,
-					};
-					AddResult(entry, typePath, score);
-				}
+			var generated = entry.kind == FavoriteKind.Namespace
+				? FavoritesManager.GetVirtualNamespaceChildren(entry)
+				: FavoritesManager.GetVirtualTypeMembers(entry);
+			foreach(var vc in generated) {
+				int vID = AssignStableTreeID(vc, treeIDMap);
+				var vde = new DisplayEntry {
+					treeID = vID,
+					entry = vc,
+					isVirtualChild = true,
+				};
+				treeIDMap[vID] = vde;
+				childItems.Add(new TreeViewItemData<DisplayEntry>(vID, vde));
 			}
-
-			void CollectEntry(FavoritesDataAsset.FavoriteEntry e, string parentPath) {
-				string name = GetDisplayName(e);
-				switch(e.kind) {
-					case FavoriteKind.Folder:
-						var folderPath = JoinPath(parentPath, name);
-						foreach(var c in e.children)
-							CollectEntry(c, folderPath);
-						break;
-					case FavoriteKind.Namespace: {
-						var nsPath = JoinPath(parentPath, name);
-						foreach(var c in e.children)
-							CollectEntry(c, nsPath);
-						// Virtual types from the namespace expansion are searchable too
-						// (namespace visibility mode applies).
-						foreach(var vc in FavoritesManager.GetVirtualNamespaceChildren(e)) {
-							AddResult(vc, nsPath);
-							Type vt = null;
-							try { vt = vc.targetType?.type; } catch { }
-							CollectTypeMembersSync(vt, JoinPath(nsPath, vt?.Name ?? vc.displayName), null);
-						}
-						break;
-					}
-					default:
-						AddResult(e, parentPath);
-						if(e.kind == FavoriteKind.Type && !e.isVirtual) {
-							var typePath = JoinPath(parentPath, name);
-							foreach(var c in e.children)
-								CollectEntry(c, typePath);
-							Type t = null;
-							try { t = e.resolvedType; } catch { }
-							// Generated members under this favorited type
-							// (hidden members per its mode are skipped).
-							CollectTypeMembersSync(t, typePath, e);
-						}
-						break;
-				}
-			}
-
-			foreach(var root in category.roots) {
-				CollectEntry(root, null);
-			}
-
-			results.Sort((a, b) => {
-				int c = b.searchScore.CompareTo(a.searchScore);
-				if(c != 0) return c;
-				return string.Compare(GetPlainTitle(a.entry), GetPlainTitle(b.entry), StringComparison.OrdinalIgnoreCase);
-			});
-
-			return results.Select(de => new TreeViewItemData<DisplayEntry>(de.treeID, de)).ToList();
 		}
 
 		float ScoreSearchTarget(FavoritesDataAsset.FavoriteEntry e) {
@@ -555,20 +372,17 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		// ═══════════════════════════════════════
-		//  Background Search
+		//  Search
 		// ═══════════════════════════════════════
-		// Search runs on a worker thread: the UI thread snapshots plain strings,
-		// the task does pure CPU work (scoring/paths/sorting), and results are
-		// applied back on the UI thread. Stale generations are discarded, so
-		// rapid typing self-cancels.
+		// One implementation drives both paths: typing runs it on a worker thread
+		// (cancellable, progress-reporting); other callers invoke it synchronously.
 
 		void OnSearchChanged(string value) {
 			searchString = value;
 			CancelPendingSearch();
 			if(string.IsNullOrEmpty(value)) {
 				HideSearchProgress();
-				// Instant restore of the hierarchy — no worker needed.
-				ReloadTreeView();
+				ReloadTreeView(); // instant restore of the hierarchy
 				return;
 			}
 			int generation = ++_searchGeneration;
@@ -576,18 +390,15 @@ namespace MaxyGames.UNode.Editors {
 			var token = _searchCts.Token;
 
 			ShowSearchProgress();
-			// Progress<T> marshals reports onto the UI thread it was created on.
 			var progress = new Progress<float>(v => UpdateSearchProgress(v));
 
-			// Snapshot phase (UI thread): capture all strings the worker needs.
 			var snapshot = BuildSearchSnapshot();
 
 			Task.Factory.StartNew(
-					state => ComputeFlatSearchInBackground(snapshot, value, token, progress),
+					state => ComputeSearch(snapshot, value, token, progress),
 					null, token, TaskCreationOptions.LongRunning, TaskScheduler.Default)
 				.ContinueWith(t => {
 					if(t.IsFaulted) {
-						// Surface unexpected worker failures; cancellations stay silent.
 						var ex = t.Exception?.InnerException ?? t.Exception;
 						if(!(ex is OperationCanceledException)) {
 							Debug.LogException(ex);
@@ -597,7 +408,8 @@ namespace MaxyGames.UNode.Editors {
 					}
 					if(t.Status != TaskStatus.RanToCompletion)
 						return; // canceled — a newer search superseded it
-					ApplyBackgroundResult(generation, t.Result);
+					InstallSearchResult(t.Result);
+					HideSearchProgress();
 				}, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.FromCurrentSynchronizationContext());
 		}
 
@@ -656,15 +468,15 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
-		/// Worker: builds the flat relevance-ranked result from the snapshot.
-		/// Pure string/CPU work only — no Unity native APIs are touched.
+		/// Builds the flat relevance-ranked result from the snapshot (mirrors
+		/// ItemSelector's SearchKind.Relevant). Pure CPU work — safe off-thread.
+		/// Namespace visibility filters its virtual types; favorited-type modes
+		/// filter their deep-searched members.
 		/// </summary>
-		SearchResult ComputeFlatSearchInBackground(List<SearchItem> snapshot, string query, CancellationToken token, IProgress<float> progress) {
+		SearchResult ComputeSearch(List<SearchItem> snapshot, string query, CancellationToken token, IProgress<float> progress) {
 			var result = new SearchResult();
 			progress?.Report(0f);
 
-			// Stable ids (entry-id hash) keep expansion state aligned across
-			// search/clear cycles; collisions are probed against the local map.
 			int AssignID(FavoritesDataAsset.FavoriteEntry e) {
 				int id = GetStableTreeID(e);
 				while(result.treeIDMap.ContainsKey(id))
@@ -672,7 +484,6 @@ namespace MaxyGames.UNode.Editors {
 				return id;
 			}
 
-			// Group by parent entry reference (children list order is authoritative).
 			var childrenByParent = new Dictionary<FavoritesDataAsset.FavoriteEntry, List<SearchItem>>();
 			var roots = new List<SearchItem>();
 			foreach(var item in snapshot) {
@@ -695,7 +506,6 @@ namespace MaxyGames.UNode.Editors {
 			static string JoinPath(string parentPath, string segment) =>
 				string.IsNullOrEmpty(parentPath) ? segment : parentPath + " > " + segment;
 
-			// Deep search: "trans pos" matches Transform members named like "pos".
 			var queryParts = query.Split(new[] { '.', ' ' }, StringSplitOptions.RemoveEmptyEntries);
 			bool deepSearch = query.Length >= ItemSelector.MinWordForDeepTypeSearch;
 
@@ -712,12 +522,8 @@ namespace MaxyGames.UNode.Editors {
 				return best;
 			}
 
-			/// <summary>
-			/// Replicates TreeSearcher.IsMatchSearch for members: with a multi-part
-			/// query ("trans pos") every trailing part must match the member name,
-			/// accumulating ItemSelector's per-part bonus; otherwise the full query
-			/// is scored against the name directly.
-			/// </summary>
+			/// <summary>Replicates TreeSearcher.IsMatchSearch for members: multi-part
+			/// queries require all trailing parts to match, with the per-part bonus.</summary>
 			float ScoreMemberName(string name) {
 				if(string.IsNullOrEmpty(name)) return -1f;
 				if(queryParts.Length >= 2) {
@@ -760,22 +566,15 @@ namespace MaxyGames.UNode.Editors {
 					entry = item.entry,
 					depth = 0,
 					parent = null,
-					isLastChild = false,
 					inNamespace = false,
 				});
 				results.Add((de, item.entry));
 			}
 
 			/// <summary>
-			/// Deep search: surfaces matching members of the given type that aren't
-			/// already favorited under it. Reflection here is pure metadata reading,
-			/// which is thread-safe; the transient entries it creates are never
-			/// persisted and resolve lazily on the UI thread when bound.
-			/// </summary>
-			/// <summary>
-			/// Deep member search. When the type is a favorited entry (ownerType),
-			/// its mode-aware member visibility is respected — hidden members are
-			/// skipped. Null owner (namespace virtual types) searches everything.
+			/// Deep member search: surfaces matching members of the given type.
+			/// When ownerType is a favorited entry its mode-aware visibility applies;
+			/// null owner (namespace virtual types) searches everything.
 			/// </summary>
 			void CollectTypeMembers(Type type, string typePath, FavoritesDataAsset.FavoriteEntry ownerType) {
 				if(!deepSearch || type == null || type.IsEnum)
@@ -790,7 +589,6 @@ namespace MaxyGames.UNode.Editors {
 					if(m is EventInfo) continue;
 					if(m is ConstructorInfo ctor && ctor.GetParameters().Length > 6) continue;
 					if(FavoritesManager.IsAccessorMethod(m)) continue;
-					// Respect the owner type's IncludeAll/ExcludeAll visibility.
 					if(!FavoritesManager.IsMemberVisibleIn(ownerType, m))
 						continue;
 					float score = ScoreMemberName(m.Name);
@@ -824,9 +622,8 @@ namespace MaxyGames.UNode.Editors {
 						var nsPath = JoinPath(parentPath, item.displayName);
 						foreach(var c in ChildrenOf(item.entry))
 							CollectEntry(c, nsPath);
-						// Virtual types of the namespace are searchable candidates.
-						// Uses the shared reflection cache; wrapper entries are built
-						// only for MATCHES to keep per-keystroke allocations tiny.
+						// Virtual namespace types are candidates; wrapper entries are
+						// built only for MATCHES to keep per-keystroke allocations tiny.
 						foreach(var t in FavoritesManager.GetNamespaceTypesRaw(item.displayName)) {
 							token.ThrowIfCancellationRequested();
 							float score = -1f;
@@ -863,7 +660,6 @@ namespace MaxyGames.UNode.Editors {
 							AddResult(item, s, parentPath);
 						// Deep member search inside favorited types — members are
 						// generated from the type, so this is their only source.
-						// Hidden members (per the type's mode) are skipped.
 						if(item.kind == FavoriteKind.Type && !item.isVirtual) {
 							var typePath = JoinPath(parentPath, item.displayName);
 							foreach(var c in ChildrenOf(item.entry))
@@ -895,33 +691,35 @@ namespace MaxyGames.UNode.Editors {
 			return result;
 		}
 
-		void ApplyBackgroundResult(int generation, SearchResult result) {
-			// Reject stale results from superseded searches / closed windows.
-			if(result == null || generation != _searchGeneration || this == null || entryTreeView == null)
-				return;
-			// Preserve hierarchical expansion before the map is swapped.
-			SnapshotExpandedState();
+		/// <summary>
+		/// Synchronous search (used when ReloadTreeView fires while a query is
+		/// active): runs the shared core on the UI thread and installs the result.
+		/// </summary>
+		List<TreeViewItemData<DisplayEntry>> RunSearch(FavoritesDataAsset.FavoriteCategory category) {
+			var result = ComputeSearch(BuildSearchSnapshot(), searchString, CancellationToken.None, null);
+			treeIDMap = result.treeIDMap;
+			visibleRows.Clear();
+			visibleRows.AddRange(result.rows);
+			return result.items;
+		}
+
+		/// <summary>Installs a search result into the live view (ids/rows/items).</summary>
+		void InstallSearchResult(SearchResult result) {
 			treeIDMap = result.treeIDMap;
 			visibleRows.Clear();
 			visibleRows.AddRange(result.rows);
 			entryTreeView.fixedItemHeight = string.IsNullOrEmpty(searchString) ? 20 : 40;
 			entryTreeView.SetRootItems(result.items);
 			entryTreeView.Rebuild();
-			ApplyExpandedState();
-			HideSearchProgress();
 			UpdateStatusLabel();
 		}
 
 		// ═══════════════════════════════════════
-		//  Display Helpers
+		//  Slot Resolution / Drag Validation
 		// ═══════════════════════════════════════
-		/// <summary>
-		/// Resolve the parent entry and sibling index for an insertion slot.
-		/// </summary>
-		/// <param name="insertIndex">The visible-row index at which an item would be inserted.</param>
-		/// <param name="parent">The resolved parent entry (null = category root).</param>
-		/// <param name="siblingIndex">The sibling index within that parent (-1 = append).</param>
-		/// <returns>false if the slot is invalid (inside a fixed namespace expansion).</returns>
+
+		/// <summary>Resolve the parent entry + sibling index for an insertion slot.
+		/// Returns false when the slot is invalid (inside a namespace expansion).</summary>
 		bool ResolveSlot(int insertIndex, out FavoritesDataAsset.FavoriteEntry parent, out int siblingIndex, out int indentDepth) {
 			parent = null;
 			siblingIndex = insertIndex;
@@ -930,21 +728,15 @@ namespace MaxyGames.UNode.Editors {
 			if(visibleRows.Count == 0)
 				return insertIndex <= 0;
 
-			// At the very top: root.
-			if(insertIndex <= 0) {
-				parent = null;
-				siblingIndex = 0;
-				indentDepth = 0;
-				return true;
-			}
+			if(insertIndex <= 0)
+				return true; // root
 
-			// Past the last visible row: anchor on the last row. If it's a folder,
-			// dropping below it means dropping INTO the folder (as its last child).
+			// Past the last row: below a folder = INTO the folder (append).
 			if(insertIndex >= visibleRows.Count) {
 				var last = visibleRows[visibleRows.Count - 1];
 				if(last.entry.kind == FavoriteKind.Folder) {
 					parent = last.entry;
-					siblingIndex = -1; // append
+					siblingIndex = -1;
 					indentDepth = last.depth + 1;
 				} else {
 					parent = last.parent;
@@ -954,7 +746,6 @@ namespace MaxyGames.UNode.Editors {
 				return true;
 			}
 
-			// Anchor on the row above the insertion slot.
 			var anchor = visibleRows[insertIndex - 1];
 
 			// Inside a fixed namespace expansion: reject.
@@ -963,7 +754,7 @@ namespace MaxyGames.UNode.Editors {
 
 			int nextDepth = visibleRows[insertIndex].depth;
 
-			// Anchor is a folder and the row below is deeper → drop INTO folder.
+			// Anchor folder + deeper row below → drop INTO folder.
 			if(anchor.entry.kind == FavoriteKind.Folder && anchor.depth < nextDepth) {
 				parent = anchor.entry;
 				siblingIndex = CountSiblingsBefore(insertIndex, anchor.entry);
@@ -971,14 +762,12 @@ namespace MaxyGames.UNode.Editors {
 				return true;
 			}
 
-			// Anchor is a folder and the row below is same or shallower → next to the folder.
 			parent = anchor.parent;
 			indentDepth = anchor.depth;
 			siblingIndex = CountSiblingsBefore(insertIndex, parent);
 			return true;
 		}
 
-		/// <summary>Count visible rows before insertIndex that share the given parent.</summary>
 		int CountSiblingsBefore(int insertIndex, FavoritesDataAsset.FavoriteEntry parent) {
 			int count = 0;
 			for(int i = 0; i < insertIndex; i++) {
@@ -988,7 +777,7 @@ namespace MaxyGames.UNode.Editors {
 			return count;
 		}
 
-		/// <summary>Validate whether a move is allowed (no cycles, no into namespaces).</summary>
+		/// <summary>Validate whether a move is allowed (no cycles, folders only).</summary>
 		bool CanMove(FavoritesDataAsset.FavoriteEntry moved, FavoritesDataAsset.FavoriteEntry parent) {
 			if(moved == null || moved.isVirtual) return false;
 			// Members are bound to their type header and can't be re-parented.
@@ -999,19 +788,17 @@ namespace MaxyGames.UNode.Editors {
 			return !FavoritesManager.IsDescendantOf(parent, moved); // no cycles
 		}
 
-
+		// ═══════════════════════════════════════
+		//  Display Helpers
+		// ═══════════════════════════════════════
 
 		string GetDisplayName(FavoritesDataAsset.FavoriteEntry e) {
-			// For virtual namespace types, targetType is populated but resolvedType is null
-			// (resolvedType skips isVirtual). Read it directly.
 			Type typeForDisplay = ResolveEntryType(e);
 
 			switch(e.kind) {
 				case FavoriteKind.Folder: return e.displayName ?? "(Folder)";
 				case FavoriteKind.Namespace: return e.displayName ?? "(Namespace)";
 				case FavoriteKind.Member:
-					if(isVirtualMember(e))
-						return typeForDisplay?.PrettyName() ?? "(Type)";
 					return GetMemberLabel(e) ?? "(missing)";
 				case FavoriteKind.Node:
 					if(!string.IsNullOrEmpty(e.nodeMenuName)) return e.nodeMenuName.Split('.').Last();
@@ -1023,14 +810,9 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		bool isVirtualMember(FavoritesDataAsset.FavoriteEntry e) {
-			return e.isVirtual && e.kind == FavoriteKind.Type;
-		}
-
 		/// <summary>
-		/// Formats a member label like ItemSelector does: pretty method/constructor
-		/// signature, extension-method formatting, and rich colored text when the
-		/// coloredItem preference is enabled.
+		/// Formats a member label like ItemSelector does: pretty signature,
+		/// extension-method formatting, colored text when the preference enables it.
 		/// </summary>
 		string GetMemberLabel(FavoritesDataAsset.FavoriteEntry e) {
 			var member = FavoritesManager.GetEntryMember(e);
@@ -1045,8 +827,6 @@ namespace MaxyGames.UNode.Editors {
 
 		/// <summary>Plain (markup-free) row title, safe for highlight span math.</summary>
 		string GetPlainTitle(FavoritesDataAsset.FavoriteEntry e) {
-			//if(e.kind == FavoriteKind.Member && !isVirtualMember(e))
-			//	return e.memberName ?? "(missing)";
 			try { return GetDisplayName(e); }
 			catch { return e.displayName ?? e.id; }
 		}
@@ -1055,9 +835,9 @@ namespace MaxyGames.UNode.Editors {
 		const string kHighlightColorTag = "#3E7DD880";
 
 		/// <summary>
-		/// Wraps the query matches inside rich-text mark tags so TextCore renders a
-		/// highlight background behind them — same spans ItemSelector highlights.
-		/// The input must be markup-free so character offsets stay valid.
+		/// Wraps query matches in rich-text mark tags so TextCore renders a highlight
+		/// background behind them — same spans ItemSelector highlights. Input must be
+		/// markup-free so character offsets stay valid.
 		/// </summary>
 		string ApplySearchHighlight(string text) {
 			if(string.IsNullOrEmpty(text) || string.IsNullOrEmpty(searchString))
@@ -1110,27 +890,17 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		/// <summary>
-		/// Second icon for member rows: the value/return type icon
-		/// (field type, property type, or method return type).
-		/// </summary>
+		/// <summary>Second icon for member rows: value/return type icon.</summary>
 		Texture GetMemberValueTypeIcon(FavoritesDataAsset.FavoriteEntry e) {
 			if(e.kind != FavoriteKind.Member)
 				return null;
 			var mi = FavoritesManager.GetEntryMember(e);
-			Type t = null;
-			if(mi is MethodInfo method)
-				t = method.ReturnType;
-			else if(mi is PropertyInfo prop)
-				t = prop.PropertyType;
-			else if(mi is FieldInfo field)
-				t = field.FieldType;
+			Type t = mi is MethodInfo method ? method.ReturnType
+				: mi is PropertyInfo prop ? prop.PropertyType
+				: mi is FieldInfo field ? field.FieldType
+				: null;
 			return t != null ? uNodeEditorUtility.GetTypeIcon(t) : null;
 		}
-
-		// ═══════════════════════════════════════
-		//  BuildNodeMenuCache
-		// ═══════════════════════════════════════
 
 		void BuildNodeMenuCache() {
 			nodeMenuCache = new Dictionary<string, NodeMenu>();
@@ -1148,7 +918,18 @@ namespace MaxyGames.UNode.Editors {
 			rootVisualElement.Clear();
 			var root = new VisualElement { style = { flexGrow = 1, flexDirection = FlexDirection.Column } };
 
-			// ── Toolbar ──
+			BuildToolbar(root);
+			BuildSearchArea(root);
+			BuildTreeArea(root);
+			BuildDetailArea(root);
+
+			rootVisualElement.Add(root);
+			rootVisualElement.RegisterCallback<KeyDownEvent>(OnWindowKeyDown);
+			UpdateCategoryDropdown();
+			ReloadTreeView();
+		}
+
+		void BuildToolbar(VisualElement root) {
 			toolbar = new Toolbar();
 
 			categoryDropdown = new DropdownField("Category", new List<string>(), 0) { style = { flexGrow = 1 } };
@@ -1157,9 +938,7 @@ namespace MaxyGames.UNode.Editors {
 
 			toolbar.Add(new ToolbarSpacer());
 
-			// Combined add button with dropdown menu
-			var addMenu = new ToolbarButton(ShowAddMenu) { text = "+ Add", tooltip = "Add Item" };
-			toolbar.Add(addMenu);
+			toolbar.Add(new ToolbarButton(ShowAddMenu) { text = "+ Add", tooltip = "Add Item" });
 
 			addMembersButton = new ToolbarButton(() => OpenAddMembersPopup(Event.current.mousePosition)) { text = "+ Members", tooltip = "Add Members (type) / Types (namespace)" };
 			addMembersButton.SetEnabled(false);
@@ -1170,8 +949,9 @@ namespace MaxyGames.UNode.Editors {
 			toolbar.Add(new ToolbarButton(() => ShowAutoSortMenu()) { text = "Sort" });
 
 			root.Add(toolbar);
+		}
 
-			// ── Search ──
+		void BuildSearchArea(VisualElement root) {
 			searchField = new TextField() { name = "search", tooltip = "Search" };
 			searchField.RegisterValueChangedCallback(evt => OnSearchChanged(evt.newValue));
 			searchField.style.marginLeft = 4;
@@ -1180,205 +960,27 @@ namespace MaxyGames.UNode.Editors {
 			searchField.style.marginBottom = 2;
 			root.Add(searchField);
 
-			// ── Search progress ──
 			searchProgressBar = new ProgressBar { title = "Searching…" };
 			searchProgressBar.style.height = 24;
 			searchProgressBar.style.marginLeft = 4;
 			searchProgressBar.style.marginRight = 4;
 			searchProgressBar.style.display = DisplayStyle.None;
 			root.Add(searchProgressBar);
+		}
 
-			// ── TreeView ──
-			// Modeled after GraphPanel.DrawElements: makeItem returns a PanelElement-like
-			// "content" row; the TreeView wraps it with itemUssClassName + itemContentContainerUssClassName.
+		void BuildTreeArea(VisualElement root) {
 			entryTreeView = new TreeView(
-				// The row manipulator is registered once per recycled element here (not in
-				// bindItem) to avoid stacking duplicate manipulators on rebind.
-				makeItem: () => {
-					var item = new PanelElement<FavoritesDataAsset.FavoriteEntry>();
-					item.style.alignItems = Align.Center;
-					// Stretch the row content to fully fill the recycled TreeView item
-					// (fixedItemHeight) so there is no dead space above/below the
-					// content — keeps hover highlight and drag hit-testing full height.
-					item.style.flexGrow = 1;
-					item.style.height = Length.Percent(100);
-
-					// Primary icon slot (member rows): shows the value/return type icon.
-					// Hidden unless bind assigns a texture to it.
-					var typeIcon = new Image { name = "type-icon" };
-					typeIcon.pickingMode = PickingMode.Ignore;
-					typeIcon.style.width = 16;
-					typeIcon.style.height = 16;
-					typeIcon.style.flexShrink = 0;
-					typeIcon.style.display = DisplayStyle.None;
-					item.Add(typeIcon);
-
-					// Two-line layout: title on top, breadcrumb path below.
-					// The path label stays hidden outside search mode.
-					var textColumn = new VisualElement { name = "text-column" };
-					textColumn.pickingMode = PickingMode.Ignore;
-					textColumn.style.flexDirection = FlexDirection.Column;
-					textColumn.style.flexGrow = 1;
-					textColumn.style.justifyContent = Justify.Center;
-					textColumn.Add(item.label);
-					var pathLabel = new Label(string.Empty) { name = "path-label" };
-					pathLabel.pickingMode = PickingMode.Ignore;
-					pathLabel.style.fontSize = 9;
-					pathLabel.style.color = new Color(0.55f, 0.55f, 0.55f);
-					pathLabel.style.display = DisplayStyle.None;
-					textColumn.Add(pathLabel);
-					item.Add(textColumn);
-					item.AddManipulator(new ContextualMenuManipulator(evt => BuildRowContextMenu(evt, item.userData as DisplayEntry)));
-					return item;
-				},
-				bindItem: (ve, index) => {
-					if(!(ve is PanelElement<FavoritesDataAsset.FavoriteEntry> item))
-						return;
-					item.index = index;
-					var de = entryTreeView.GetItemDataForIndex<DisplayEntry>(index);
-					if(de == null) return;
-					item.value = de.entry;
-					item.userData = de;
-
-					// Lazily-loaded placeholder row: renders as "…" and is inert.
-					if(de.isPlaceholder) {
-						bool phSearch = !string.IsNullOrEmpty(searchString);
-						item.CanDragFunc = () => false;
-						item.CanDragInsideParentFunc = () => false;
-						item.CanHaveChildsFunc = () => false;
-						item.GetDragGenericData = () => null;
-						item.onClick = null;
-						item.style.backgroundColor = Color.clear;
-						item.label.text = "…";
-						item.label.style.opacity = 0.5f;
-						item.ShowIcon(null);
-						var phTypeIcon = item.Q<Image>("type-icon");
-						if(phTypeIcon != null) phTypeIcon.style.display = DisplayStyle.None;
-						var phPathLabel = item.Q<Label>("path-label");
-						if(phPathLabel != null) phPathLabel.style.display = DisplayStyle.None;
-						return;
-					}
-					item.label.style.opacity = 1f;
-
-					// Drag behavior:
-					// - Type & Member rows are graph-draggable (payload key "uNode",
-					//   matching the NodeBrowser/graph contract), including virtual
-					//   rows generated from namespaces/types.
-					// - Reordering stays limited to persisted non-virtual rows and is
-					//   disabled while searching; virtual entries can never reorder —
-					//   CanMove/Move reject them, so stray drops are ignored.
-					bool isVirtual = de.isVirtualChild || de.entry.isVirtual;
-					bool hasSearch = !string.IsNullOrEmpty(searchString);
-					var graphPayload = GetGraphDragPayload(de.entry);
-					bool isGraphItem = graphPayload != null;
-					bool canReorder = !isVirtual && !hasSearch;
-					bool canDrag = isGraphItem || canReorder;
-					item.CanDragFunc = () => canDrag;
-					item.CanDragInsideParentFunc = () => canReorder;
-					item.CanHaveChildsFunc = () => de.entry.kind == FavoriteKind.Folder && !de.entry.isVirtual && !hasSearch;
-
-					// Drag payload: reorder key plus the "uNode" graph contract
-					// (System.Type / MemberInfo / NodeMenu — what UGraphView reads).
-					item.GetDragGenericData = () => {
-						if(!canDrag)
-							return null;
-						var data = new Dictionary<string, object> {
-							{ "favoriteEntry", de.entry },
-						};
-						if(graphPayload != null)
-							data["uNode"] = graphPayload;
-						return data;
-					};
-
-					// Manual selection handling (GraphPanel pattern).
-					var captured = de; // capture for closure
-					item.onClick = (evt) => {
-						selectedEntry = captured;
-						UpdateDetailPanel();
-						UpdateAddMembersButton();
-						entryTreeView.RefreshItems();
-						if(evt is MouseUpEvent mouseEvt && mouseEvt.clickCount >= 2) {
-							TryCreateNode(captured);
-						}
-					};
-
-					// Selection highlight
-					bool isSelected = selectedEntry != null && selectedEntry.entry != null
-						&& captured.entry != null
-						&& captured.entry.id == selectedEntry.entry.id
-						&& captured.isVirtualChild == selectedEntry.isVirtualChild;
-					item.style.backgroundColor = isSelected ? new Color(0.24f, 0.49f, 0.91f, 0.35f) : Color.clear;
-
-					// Update visual content using ClickableElement's built-in label/icon
-					// (matching GraphPanel's SetupPanelElement pattern).
-					// In search mode the title is markup-free so highlight spans stay valid.
-					item.label.text = hasSearch
-						? ApplySearchHighlight(GetPlainTitle(de.entry))
-						: GetDisplayName(de.entry);
-					item.ShowIcon(GetIcon(de.entry));
-					// Fixed icon size keeps rows aligned even when a texture is missing.
-					if(item.icon != null) {
-						item.icon.style.width = 16;
-						item.icon.style.height = 16;
-						item.icon.style.flexShrink = 0;
-					}
-
-					var typeIconImg = item.Q<Image>("type-icon");
-					if(typeIconImg != null) {
-						var secondTex = GetMemberValueTypeIcon(de.entry);
-						typeIconImg.image = secondTex;
-						typeIconImg.style.display = secondTex != null ? DisplayStyle.Flex : DisplayStyle.None;
-					}
-
-					// Search mode shows the breadcrumb path under the title.
-					var pathLabel = item.Q<Label>("path-label");
-					if(pathLabel != null) {
-						bool showPath = hasSearch && !string.IsNullOrEmpty(de.searchPath);
-						pathLabel.text = showPath ? ApplySearchHighlight(de.searchPath) : string.Empty;
-						pathLabel.style.display = showPath ? DisplayStyle.Flex : DisplayStyle.None;
-					}
-				}
+				makeItem: () => CreateRowElement(),
+				bindItem: (ve, index) => BindRow(ve, index)
 			);
-			// Handle selection manually (like GraphPanel) so clicks don't conflict
-			// with the TreeView's built-in selection.
 			entryTreeView.selectionType = SelectionType.None;
 			entryTreeView.showAlternatingRowBackgrounds = AlternatingRowBackground.All;
 			entryTreeView.style.flexGrow = 1;
-			// Fixed row height ensures every row is the same size, eliminating
-			// hit-test gaps between rows where drag cannot start.
 			entryTreeView.virtualizationMethod = CollectionVirtualizationMethod.FixedHeight;
 			entryTreeView.fixedItemHeight = 20;
 
-			// Drag-and-drop: standard TreeViewDragger + custom controller
-			// (same pattern as GraphPanel's TreeViewUGraphElementDragAndDropController).
 			var dragger = new TreeViewDragger(entryTreeView);
-			// The controller forwards the dragged entry plus the drop position;
-			// we resolve parent + sibling from it, validate, persist, and rebuild.
-			dragger.dragAndDropController = new FavoritesReorderController(entryTreeView, (movedEntry, insertIndex, overItem) => {
-				if(movedEntry == null) return;
-				// No reordering while searching (flat relevance view).
-				if(!string.IsNullOrEmpty(searchString)) return;
-				FavoritesDataAsset.FavoriteEntry parent;
-				int siblingIndex;
-				if(overItem) {
-					// Dropping ONTO a row nests inside it — only folders accept children.
-					var target = entryTreeView.GetItemDataForIndex<DisplayEntry>(insertIndex);
-					if(target == null || target.isVirtualChild || target.entry.isVirtual) return;
-					if(target.entry.kind != FavoriteKind.Folder) return;
-					parent = target.entry;
-					siblingIndex = -1; // append as last child
-				}
-				else {
-					// Dropping BETWEEN rows resolves the slot like GraphPanel does.
-					if(!ResolveSlot(insertIndex, out var resolvedParent, out var resolvedSibling, out _)) return;
-					parent = resolvedParent;
-					siblingIndex = resolvedSibling;
-				}
-				if(!CanMove(movedEntry, parent)) return;
-				int sibling = siblingIndex < 0 ? -1 : siblingIndex; // -1 = append
-				FavoritesManager.Move(movedEntry, parent, sibling, CurrentCategory);
-				ReloadTreeView();
-			});
+			dragger.dragAndDropController = new FavoritesReorderController(entryTreeView, OnEntryDropped);
 
 			// Blank-area context menu (row menus stop propagation so this doesn't double up).
 			entryTreeView.AddManipulator(new ContextualMenuManipulator(evt => {
@@ -1390,18 +992,9 @@ namespace MaxyGames.UNode.Editors {
 			// Last-chance snapshot when the tree detaches (window closing).
 			entryTreeView.RegisterCallback<DetachFromPanelEvent>(_ => SnapshotExpandedState());
 			root.Add(entryTreeView);
+		}
 
-			// ── Status / empty state ──
-			statusLabel = new Label("") {
-				style = {
-					flexShrink = 0, unityTextAlign = TextAnchor.MiddleCenter,
-					color = new Color(.5f, .5f, .5f), paddingTop = 12,
-					display = DisplayStyle.None
-				}
-			};
-			root.Add(statusLabel);
-
-			// ── Detail ──
+		void BuildDetailArea(VisualElement root) {
 			detailArea = new VisualElement {
 				style = {
 					flexShrink = 0, paddingTop = 6, paddingBottom = 6, paddingLeft = 8, paddingRight = 8,
@@ -1415,45 +1008,201 @@ namespace MaxyGames.UNode.Editors {
 			detailArea.Add(detailTypeLabel);
 			detailArea.Add(detailScroll);
 			root.Add(detailArea);
+		}
 
-			rootVisualElement.Add(root);
-			rootVisualElement.RegisterCallback<KeyDownEvent>(OnWindowKeyDown);
-			UpdateCategoryDropdown();
+		/// <summary>Recycled row template: [type-icon][text-column(title+path)].</summary>
+		PanelElement<FavoritesDataAsset.FavoriteEntry> CreateRowElement() {
+			var item = new PanelElement<FavoritesDataAsset.FavoriteEntry>();
+			item.style.alignItems = Align.Center;
+			// Stretch to fill the recycled item so hover/drag hit-testing is full height.
+			item.style.flexGrow = 1;
+			item.style.height = Length.Percent(100);
+
+			// Secondary icon slot (member rows): value/return type icon.
+			var typeIcon = new Image { name = "type-icon" };
+			typeIcon.pickingMode = PickingMode.Ignore;
+			typeIcon.style.width = 16;
+			typeIcon.style.height = 16;
+			typeIcon.style.flexShrink = 0;
+			typeIcon.style.display = DisplayStyle.None;
+			item.Add(typeIcon);
+
+			// Two-line layout: title on top, breadcrumb path below (search only).
+			var textColumn = new VisualElement { name = "text-column" };
+			textColumn.pickingMode = PickingMode.Ignore;
+			textColumn.style.flexDirection = FlexDirection.Column;
+			textColumn.style.flexGrow = 1;
+			textColumn.style.justifyContent = Justify.Center;
+			textColumn.Add(item.label);
+			var pathLabel = new Label(string.Empty) { name = "path-label" };
+			pathLabel.pickingMode = PickingMode.Ignore;
+			pathLabel.style.fontSize = 9;
+			pathLabel.style.color = new Color(0.55f, 0.55f, 0.55f);
+			pathLabel.style.display = DisplayStyle.None;
+			textColumn.Add(pathLabel);
+			item.Add(textColumn);
+			item.AddManipulator(new ContextualMenuManipulator(evt => BuildRowContextMenu(evt, item.userData as DisplayEntry)));
+			return item;
+		}
+
+		void BindRow(VisualElement ve, int index) {
+			if(!(ve is PanelElement<FavoritesDataAsset.FavoriteEntry> item))
+				return;
+			item.index = index;
+			var de = entryTreeView.GetItemDataForIndex<DisplayEntry>(index);
+			if(de == null) return;
+			item.value = de.entry;
+			item.userData = de;
+
+			bool hasSearch = !string.IsNullOrEmpty(searchString);
+
+			if(de.isPlaceholder) {
+				BindPlaceholderRow(item, hasSearch);
+				return;
+			}
+			item.label.style.opacity = 1f;
+
+			BindRowInteractions(item, de, hasSearch);
+			BindSelection(item, de);
+			BindRowVisuals(item, de, hasSearch);
+		}
+
+		/// <summary>Lazily-warmed placeholder row: renders as "…" and is inert.</summary>
+		void BindPlaceholderRow(PanelElement<FavoritesDataAsset.FavoriteEntry> item, bool hasSearch) {
+			item.CanDragFunc = () => false;
+			item.CanDragInsideParentFunc = () => false;
+			item.CanHaveChildsFunc = () => false;
+			item.GetDragGenericData = () => null;
+			item.onClick = null;
+			item.style.backgroundColor = Color.clear;
+			item.label.text = "…";
+			item.label.style.opacity = 0.5f;
+			item.ShowIcon(null);
+			var typeIcon = item.Q<Image>("type-icon");
+			if(typeIcon != null) typeIcon.style.display = DisplayStyle.None;
+			var pathLabel = item.Q<Label>("path-label");
+			if(pathLabel != null) pathLabel.style.display = DisplayStyle.None;
+		}
+
+		void BindRowInteractions(PanelElement<FavoritesDataAsset.FavoriteEntry> item,
+			DisplayEntry de, bool hasSearch) {
+			// Type & Member rows are graph-draggable ("uNode" contract), including
+			// generated virtual rows. Reordering is limited to persisted non-virtual
+			// rows and disabled while searching; Move rejects virtual entries anyway.
+			bool isVirtual = de.isVirtualChild || de.entry.isVirtual;
+			var graphPayload = GetGraphDragPayload(de.entry);
+			bool canReorder = !isVirtual && !hasSearch;
+			bool canDrag = graphPayload != null || canReorder;
+			item.CanDragFunc = () => canDrag;
+			item.CanDragInsideParentFunc = () => canReorder;
+			item.CanHaveChildsFunc = () => de.entry.kind == FavoriteKind.Folder && !de.entry.isVirtual && !hasSearch;
+
+			item.GetDragGenericData = () => {
+				if(!canDrag)
+					return null;
+				var data = new Dictionary<string, object> {
+					{ "favoriteEntry", de.entry },
+				};
+				if(graphPayload != null)
+					data["uNode"] = graphPayload;
+				return data;
+			};
+
+			var captured = de;
+			item.onClick = (evt) => {
+				selectedEntry = captured;
+				UpdateDetailPanel();
+				UpdateAddMembersButton();
+				entryTreeView.RefreshItems();
+				if(evt is MouseUpEvent mouseEvt && mouseEvt.clickCount >= 2) {
+					TryCreateNode(captured);
+				}
+			};
+		}
+
+		void BindSelection(PanelElement<FavoritesDataAsset.FavoriteEntry> item, DisplayEntry de) {
+			bool isSelected = selectedEntry != null && selectedEntry.entry != null
+				&& de.entry != null
+				&& de.entry.id == selectedEntry.entry.id
+				&& de.isVirtualChild == selectedEntry.isVirtualChild;
+			item.style.backgroundColor = isSelected ? new Color(0.24f, 0.49f, 0.91f, 0.35f) : Color.clear;
+		}
+
+		void BindRowVisuals(PanelElement<FavoritesDataAsset.FavoriteEntry> item,
+			DisplayEntry de, bool hasSearch) {
+			// In search mode the title is markup-free so highlight spans stay valid.
+			item.label.text = hasSearch
+				? ApplySearchHighlight(GetPlainTitle(de.entry))
+				: GetDisplayName(de.entry);
+			item.ShowIcon(GetIcon(de.entry));
+			if(item.icon != null) {
+				item.icon.style.width = 16;
+				item.icon.style.height = 16;
+				item.icon.style.flexShrink = 0;
+			}
+
+			var typeIconImg = item.Q<Image>("type-icon");
+			if(typeIconImg != null) {
+				var secondTex = GetMemberValueTypeIcon(de.entry);
+				typeIconImg.image = secondTex;
+				typeIconImg.style.display = secondTex != null ? DisplayStyle.Flex : DisplayStyle.None;
+			}
+
+			var pathLabel = item.Q<Label>("path-label");
+			if(pathLabel != null) {
+				bool showPath = hasSearch && !string.IsNullOrEmpty(de.searchPath);
+				pathLabel.text = showPath ? ApplySearchHighlight(de.searchPath) : string.Empty;
+				pathLabel.style.display = showPath ? DisplayStyle.Flex : DisplayStyle.None;
+			}
+		}
+
+		void OnEntryDropped(FavoritesDataAsset.FavoriteEntry movedEntry, int insertIndex, bool overItem) {
+			if(movedEntry == null) return;
+			// No reordering while searching (flat relevance view).
+			if(!string.IsNullOrEmpty(searchString)) return;
+			FavoritesDataAsset.FavoriteEntry parent;
+			int siblingIndex;
+			if(overItem) {
+				// Dropping ONTO a row nests inside it — only folders accept children.
+				var target = entryTreeView.GetItemDataForIndex<DisplayEntry>(insertIndex);
+				if(target == null || target.isVirtualChild || target.entry.isVirtual) return;
+				if(target.entry.kind != FavoriteKind.Folder) return;
+				parent = target.entry;
+				siblingIndex = -1; // append as last child
+			}
+			else {
+				// Dropping BETWEEN rows resolves the slot like GraphPanel does.
+				if(!ResolveSlot(insertIndex, out var resolvedParent, out var resolvedSibling, out _)) return;
+				parent = resolvedParent;
+				siblingIndex = resolvedSibling;
+			}
+			if(!CanMove(movedEntry, parent)) return;
+			int sibling = siblingIndex < 0 ? -1 : siblingIndex; // -1 = append
+			FavoritesManager.Move(movedEntry, parent, sibling, CurrentCategory);
 			ReloadTreeView();
 		}
 
-		string GetEntryIDForTreeViewID(int treeID) {
-			if(treeID <= 0) return string.Empty;
-			return treeIDMap.TryGetValue(treeID, out var de) ? de.entry.id : string.Empty;
-		}
-
 		// ═══════════════════════════════════════
-		//  TreeView Rebuild
+		//  TreeView Rebuild / Expansion / Warming
 		// ═══════════════════════════════════════
 
 		void ReloadTreeView() {
 			// Data changed — any in-flight background result is now stale.
 			CancelPendingSearch();
 			HideSearchProgress();
-			// Capture expansion before the id map is rebuilt.
-			SnapshotExpandedState();
+			SnapshotExpandedState(); // capture expansion before the id map is rebuilt
 			var items = BuildTreeData();
-			// Search rows are double height to fit the title + path description
-			// (same as ItemSelector's relevance results).
 			entryTreeView.fixedItemHeight = string.IsNullOrEmpty(searchString) ? 20 : 40;
 			entryTreeView.SetRootItems(items);
 			entryTreeView.Rebuild();
 			ApplyExpandedState();
 			UpdateStatusLabel();
-			// Cold reflection caches → warm them off-thread, then reload once so
-			// placeholder rows swap to their real generated children.
-			KickWarmUp();
+			KickWarmUp(); // cold caches → warm off-thread, placeholders swap afterwards
 		}
 
 		/// <summary>
-		/// Warms raw reflection caches for every expandable entry of the current
-		/// category that isn't cached yet (off-thread), then reloads the tree once
-		/// complete. No-op while a warm-up is already running or when fully warm.
+		/// Warms raw reflection caches for expandable entries of the current
+		/// category that aren't cached yet (off-thread), then reloads once done.
 		/// </summary>
 		void KickWarmUp() {
 			if(_warming || CurrentCategory == null)
@@ -1477,11 +1226,7 @@ namespace MaxyGames.UNode.Editors {
 			}, TaskScheduler.FromCurrentSynchronizationContext());
 		}
 
-		/// <summary>
-		/// Records which expandable rows are currently expanded into the
-		/// persistent store. Must run BEFORE the tree id map is replaced,
-		/// while the old ids still map to live rows.
-		/// </summary>
+		/// <summary>Persists current expansion states. Runs BEFORE the id map changes.</summary>
 		void SnapshotExpandedState() {
 			if(entryTreeView == null || entryTreeView.panel == null)
 				return;
@@ -1498,7 +1243,7 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		/// <summary>Rows that can expand: folders, namespaces, and type items (with virtual members).</summary>
+		/// <summary>Folders, namespaces, and type items can expand.</summary>
 		static bool IsExpandableEntry(FavoritesDataAsset.FavoriteEntry e) {
 			if(e.isVirtual)
 				return false;
@@ -1544,57 +1289,36 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		/// <summary>
-		/// Right-click menu for a tree row (the manipulator is attached once per row element;
-		/// the current entry is passed via userData). Stops propagation so the blank-area
-		/// menu on the TreeView doesn't also populate.
-		/// </summary>
+		// ═══════════════════════════════════════
+		//  Row Context Menu
+		// ═══════════════════════════════════════
+
 		void BuildRowContextMenu(ContextualMenuPopulateEvent evt, DisplayEntry de) {
 			if(de == null || de.entry == null || de.isPlaceholder)
 				return;
 			var e = de.entry;
 
 			if(de.isVirtualChild || e.isVirtual) {
-				// Virtual rows are read-only; node creation and (for rows bound to a
-				// favorited owner) remove-to-hide are offered.
-				if(e.kind == FavoriteKind.Type) {
-					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
-					// Virtual types owned by a favorited namespace can be hidden
-					// (persisted in the namespace's mode list).
-					var nsOwner = ResolveOwningNamespace(e);
-					if(nsOwner != null && !string.IsNullOrEmpty(e.displayName)) {
-						evt.menu.AppendSeparator();
-						evt.menu.AppendAction("Remove", _ => SetTypeNameVisible(nsOwner, e.displayName, false));
-					}
-				} else if(e.kind == FavoriteKind.Member && e.rawMember != null) {
-					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
-					// Removing a generated member persists it in the type's mode list.
-					var owner = ResolveOwningType(e);
-					var ownerMember = FavoritesManager.GetEntryMember(e);
-					if(owner != null && ownerMember != null) {
-						evt.menu.AppendSeparator();
-						evt.menu.AppendAction("Remove", _ => SetMemberVisible(owner, ownerMember, false));
-					}
-				}
+				AppendVirtualRowMenu(evt, de, e);
 				evt.StopPropagation();
 				return;
 			}
 
 			switch(e.kind) {
 				case FavoriteKind.Folder:
-					evt.menu.AppendAction("New Folder", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); CreateNewFolder(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("New Folder", a => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); CreateNewFolder(a.eventInfo.mousePosition); });
 					evt.menu.AppendAction("Rename", _ => { selectedEntry = de; RenameSelectedFolder(); });
 					evt.menu.AppendSeparator();
-					evt.menu.AppendAction("Add Namespace", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); AddNamespaceFavorite(e.eventInfo.mousePosition); });
-					evt.menu.AppendAction("Add Type / Member", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(e.eventInfo.mousePosition); });
-					evt.menu.AppendAction("Add Node...", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); OpenAddNodePopup(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Namespace", a => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); AddNamespaceFavorite(a.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Type / Member", a => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(a.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Node...", a => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); OpenAddNodePopup(a.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Type:
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
-					evt.menu.AppendAction("Add Members...", e => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Members...", a => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(a.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Namespace:
-					evt.menu.AppendAction("Add Types...", e => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Types...", a => { selectedEntry = de; UpdateDetailPanel(); UpdateAddMembersButton(); OpenAddMembersPopup(a.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Node:
 				case FavoriteKind.Member:
@@ -1606,16 +1330,39 @@ namespace MaxyGames.UNode.Editors {
 			evt.StopPropagation();
 		}
 
+		/// <summary>Menu for generated (virtual) rows: create-node + remove-to-hide.</summary>
+		void AppendVirtualRowMenu(ContextualMenuPopulateEvent evt, DisplayEntry de,
+			FavoritesDataAsset.FavoriteEntry e) {
+			if(e.kind == FavoriteKind.Type) {
+				evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
+				// Virtual types owned by a namespace can be hidden (persisted there).
+				var nsOwner = ResolveOwner(e);
+				if(nsOwner != null && !string.IsNullOrEmpty(e.displayName)) {
+					evt.menu.AppendSeparator();
+					evt.menu.AppendAction("Remove", _ => SetListVisibility(nsOwner, e.displayName, null, false));
+				}
+			} else if(e.kind == FavoriteKind.Member && e.rawMember != null) {
+				evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
+				// Removing a generated member persists it in the type's mode list.
+				var owner = ResolveOwner(e);
+				var ownerMember = FavoritesManager.GetEntryMember(e);
+				if(owner != null && ownerMember != null) {
+					evt.menu.AppendSeparator();
+					evt.menu.AppendAction("Remove", _ => SetListVisibility(owner, null, ownerMember, false));
+				}
+			}
+		}
+
 		// ═══════════════════════════════════════
-		//  Selection / Detail
+		//  Selection / Detail Panel
 		// ═══════════════════════════════════════
 
 		void UpdateAddMembersButton() {
-			if(addMembersButton != null) {
-				bool isType = selectedEntry != null && selectedEntry.entry.kind == FavoriteKind.Type && !selectedEntry.isVirtualChild;
-				bool isNamespace = selectedEntry != null && selectedEntry.entry.kind == FavoriteKind.Namespace;
-				addMembersButton.SetEnabled(isType || isNamespace);
-			}
+			if(addMembersButton == null) return;
+			bool enabled = selectedEntry != null && !selectedEntry.isVirtualChild &&
+				(selectedEntry.entry.kind == FavoriteKind.Type ||
+				 selectedEntry.entry.kind == FavoriteKind.Namespace);
+			addMembersButton.SetEnabled(enabled);
 		}
 
 		void UpdateDetailPanel() {
@@ -1635,10 +1382,6 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		// ═══════════════════════════════════════
-		//  Detail Summary
-		// ═══════════════════════════════════════
-
 		struct SummaryLine {
 			public Texture icon;
 			public string text;
@@ -1650,14 +1393,12 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
-		/// Builds the selection summary shown in the detail panel, mirroring the
-		/// ItemSelector/NodeBrowser tooltip contents (declaring type, assembly,
-		/// target/static, return/value type, XML documentation, parameters).
+		/// Selection summary mirroring the ItemSelector/NodeBrowser tooltip contents
+		/// (declaring type, assembly, target/static, return/value type, XML docs).
 		/// </summary>
 		List<SummaryLine> BuildSummaryLines(FavoritesDataAsset.FavoriteEntry e) {
 			var lines = new List<SummaryLine>();
 
-			// Location breadcrumb (parent chain within the category).
 			var path = BuildEntryPath(e);
 			if(!string.IsNullOrEmpty(path))
 				lines.Add(new SummaryLine(null, path));
@@ -1678,8 +1419,7 @@ namespace MaxyGames.UNode.Editors {
 					break;
 				}
 				case FavoriteKind.Type: {
-					Type t = null;
-					try { t = ResolveEntryType(e); } catch { }
+					Type t = ResolveTypeSafe(e);
 					if(t != null) {
 						lines.Add(new SummaryLine(uNodeEditorUtility.GetTypeIcon(t), t.PrettyName(true)));
 						if(t.Assembly != null)
@@ -1703,7 +1443,7 @@ namespace MaxyGames.UNode.Editors {
 				case FavoriteKind.Node: {
 					if(!string.IsNullOrEmpty(e.nodeMenuName))
 						lines.Add(new SummaryLine(null, e.nodeMenuName));
-					Type t = ResolveOwningNodeTypeSafe(e);
+					Type t = ResolveTypeSafe(e);
 					if(t != null)
 						AppendDocumentation(lines, t);
 					break;
@@ -1712,7 +1452,7 @@ namespace MaxyGames.UNode.Editors {
 			return lines;
 		}
 
-		Type ResolveOwningNodeTypeSafe(FavoritesDataAsset.FavoriteEntry e) {
+		Type ResolveTypeSafe(FavoritesDataAsset.FavoriteEntry e) {
 			try { return e.resolvedType; } catch { return null; }
 		}
 
@@ -1815,6 +1555,7 @@ namespace MaxyGames.UNode.Editors {
 			).ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
+		/// <summary>Picks go through here: ensure declaring type exists, then show member.</summary>
 		void AddMemberDataAsFavorite(MemberData memberData) {
 			if(memberData == null) return;
 
@@ -1838,9 +1579,8 @@ namespace MaxyGames.UNode.Editors {
 				var members = memberData.GetMembers(false);
 				if(members == null || members.Length == 0) return;
 				var last = members[members.Length - 1];
-				// Keep generic methods open — e.g. GetComponent<T>() stays as
-				// GetComponent<T>. ItemSelector auto-closes generics at selection
-				// time; the graph editor prompts for type args only when used.
+				// Keep generic methods open — GetComponent<T>() stays GetComponent<T>.
+				// The graph editor prompts for type args only when used.
 				if(last is MethodInfo genericMethod && genericMethod.IsGenericMethod && !genericMethod.IsGenericMethodDefinition)
 					last = genericMethod.GetGenericMethodDefinition();
 				var declType = last.DeclaringType ?? memberData.startType;
@@ -1861,9 +1601,8 @@ namespace MaxyGames.UNode.Editors {
 				if(typeHeader == null) return;
 
 				if(created) {
-					// Picking a member on a brand-new type: start in ExcludeAll mode
-					// so ONLY the picked member is visible; the user can flip to
-					// Include All from the Members-of popup at any time.
+					// Brand-new type from a member pick: ExcludeAll so ONLY the picked
+					// member shows; flip to Include All in the Members-of popup later.
 					typeHeader.memberMode = TypeMemberMode.ExcludeAll;
 					if(typeHeader.excludedMembers == null)
 						typeHeader.excludedMembers = new List<string>();
@@ -1874,43 +1613,70 @@ namespace MaxyGames.UNode.Editors {
 					FavoritesManager.NotifyChanged();
 				}
 				else {
-					// Existing type item: just make the picked member visible.
 					SetMemberVisible(typeHeader, last, true);
 				}
 			}
 			ReloadTreeView();
 		}
 
-		/// <summary>
-		/// Resolves the favorited type entry that owns a generated member row.
-		/// Returns null for rows without a favorited owner (deep-search results).
-		/// </summary>
-		FavoritesDataAsset.FavoriteEntry ResolveOwningType(FavoritesDataAsset.FavoriteEntry memberEntry) {
-			return memberEntry?.ownerEntry;
+		void ShowAutoSortMenu() {
+			var menu = new GenericMenu();
+			menu.AddItem(new GUIContent("Name (A-Z)"), false, () => AutoSort((a, b) => string.Compare(GetDisplayName(a), GetDisplayName(b), StringComparison.OrdinalIgnoreCase)));
+			menu.AddItem(new GUIContent("Name (Z-A)"), false, () => AutoSort((a, b) => string.Compare(GetDisplayName(b), GetDisplayName(a), StringComparison.OrdinalIgnoreCase)));
+			menu.AddItem(new GUIContent("Kind"), false, () => AutoSort((a, b) => {
+				int c = ((int)a.kind).CompareTo((int)b.kind);
+				return c != 0 ? c : string.Compare(GetDisplayName(a), GetDisplayName(b), StringComparison.OrdinalIgnoreCase);
+			}));
+			menu.ShowAsContext();
 		}
 
-		/// <summary>
-		/// Resolves the favorited namespace entry that owns a generated virtual
-		/// type row. Returns null for rows without a favorited owner.
-		/// </summary>
-		FavoritesDataAsset.FavoriteEntry ResolveOwningNamespace(FavoritesDataAsset.FavoriteEntry typeEntry) {
-			return typeEntry?.ownerEntry;
+		void AutoSort(Comparison<FavoritesDataAsset.FavoriteEntry> comparer) {
+			var parent = selectedEntry != null && selectedEntry.entry.CanHaveChilds ? selectedEntry.entry : null;
+			FavoritesManager.SortChildren(parent, CurrentCategory, (a, b) => {
+				int tc = a.kind.CompareTo(b.kind);
+				return tc != 0 ? tc : comparer(a, b);
+			});
+			ReloadTreeView();
 		}
 
-		/// <summary>
-		/// Show/hide a generated virtual type under its namespace favorite by
-		/// toggling the name in the namespace's mode list (mirrors SetMemberVisible).
-		/// </summary>
+		// ═══════════════════════════════════════
+		//  Visibility (generated rows)
+		// ═══════════════════════════════════════
+
+		static bool IsMemberVisible(FavoritesDataAsset.FavoriteEntry owner, MemberInfo member) {
+			if(owner == null || member == null)
+				return false;
+			bool inList = owner.excludedMembers != null && owner.excludedMembers.Contains(member.Name);
+			return owner.memberMode == TypeMemberMode.ExcludeAll ? inList : !inList;
+		}
+
+		/// <summary>Show/hide a generated member (mode-aware write; persists).</summary>
+		void SetMemberVisible(FavoritesDataAsset.FavoriteEntry owner, MemberInfo member, bool visible) {
+			SetListVisibility(owner, null, member, visible);
+		}
+
+		/// <summary>Show/hide a generated virtual type under a namespace favorite.</summary>
 		void SetTypeNameVisible(FavoritesDataAsset.FavoriteEntry nsEntry, string typeName, bool visible) {
-			if(nsEntry == null || string.IsNullOrEmpty(typeName))
+			SetListVisibility(nsEntry, typeName, null, visible);
+		}
+
+		/// <summary>
+		/// Mode-aware add/remove of a name in an entry's excludedMembers list.
+		/// IncludeAll: listed = hidden. ExcludeAll: listed = visible. Persists.
+		/// </summary>
+		void SetListVisibility(FavoritesDataAsset.FavoriteEntry owner, string typeName, MemberInfo member, bool visible) {
+			if(owner == null)
 				return;
-			if(nsEntry.excludedMembers == null)
-				nsEntry.excludedMembers = new List<string>();
-			bool shouldContain = nsEntry.memberMode == TypeMemberMode.ExcludeAll ? visible : !visible;
+			string name = member != null ? member.Name : typeName;
+			if(string.IsNullOrEmpty(name))
+				return;
+			if(owner.excludedMembers == null)
+				owner.excludedMembers = new List<string>();
+			bool shouldContain = owner.memberMode == TypeMemberMode.ExcludeAll ? visible : !visible;
 			bool changed;
 			if(shouldContain) {
-				if(!nsEntry.excludedMembers.Contains(typeName)) {
-					nsEntry.excludedMembers.Add(typeName);
+				if(!owner.excludedMembers.Contains(name)) {
+					owner.excludedMembers.Add(name);
 					changed = true;
 				}
 				else {
@@ -1918,7 +1684,7 @@ namespace MaxyGames.UNode.Editors {
 				}
 			}
 			else {
-				changed = nsEntry.excludedMembers.Remove(typeName);
+				changed = owner.excludedMembers.Remove(name);
 			}
 			if(changed) {
 				FavoritesManager.Save();
@@ -1926,27 +1692,33 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
+		/// <summary>Owning favorite for a generated row; null for deep-search results.</summary>
+		FavoritesDataAsset.FavoriteEntry ResolveOwner(FavoritesDataAsset.FavoriteEntry entry) {
+			return entry?.ownerEntry;
+		}
+
 		void RemoveSelected() {
 			if(selectedEntry == null || selectedEntry.entry == null)
 				return;
 			var e = selectedEntry.entry;
-			// Generated members are removed by persisting their visibility state
-			// on the owning type (mode-aware: exclusion in IncludeAll, omission in ExcludeAll).
-			if(e.kind == FavoriteKind.Member && e.isVirtual) {
-				var owner = ResolveOwningType(e);
-				var ownerMember = FavoritesManager.GetEntryMember(e);
-				if(owner != null && ownerMember != null) {
-					SetMemberVisible(owner, ownerMember, false);
-					selectedEntry = null;
-					UpdateDetailPanel();
-					UpdateAddMembersButton();
-					return; // NotifyChanged already reloaded the tree
+			// Generated members/virtual types hide via their owner's mode list.
+			if(e.isVirtual) {
+				var owner = ResolveOwner(e);
+				if(owner != null) {
+					if(e.kind == FavoriteKind.Member) {
+						var mi = FavoritesManager.GetEntryMember(e);
+						if(mi != null) {
+							SetListVisibility(owner, null, mi, false);
+						}
+					}
+					else if(e.kind == FavoriteKind.Type && !string.IsNullOrEmpty(e.displayName)) {
+						SetListVisibility(owner, e.displayName, null, false);
+					}
 				}
-				// Ownerless (deep-search result): just drop the selection.
 				selectedEntry = null;
 				UpdateDetailPanel();
 				UpdateAddMembersButton();
-				return;
+				return; // NotifyChanged already reloaded the tree
 			}
 			FavoritesManager.Remove(e);
 			selectedEntry = null;
@@ -1955,42 +1727,18 @@ namespace MaxyGames.UNode.Editors {
 			UpdateAddMembersButton();
 		}
 
-		void OpenAddMembersPopup(Vector2 mousePosition) {
-			if(selectedEntry == null || selectedEntry.isVirtualChild) return;
-			// Namespace favorites manage their generated TYPE list instead.
-			if(selectedEntry.entry.kind == FavoriteKind.Namespace) {
-				ActionPopupWindow.Show(() => BuildNamespaceTypesUI(selectedEntry.entry))
-					.ChangePosition(this.GetMousePositionForMenu(mousePosition));
-				return;
-			}
-			if(selectedEntry.entry.kind != FavoriteKind.Type) return;
-			var e = selectedEntry.entry;
-			if(e.isVirtual) return;
-			var type = e.resolvedType;
-			if(type == null) return;
+		// ═══════════════════════════════════════
+		//  Popups
+		// ═══════════════════════════════════════
 
-			var validMembers = EditorReflectionUtility.GetSortedMembers(type, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
-				.Where(m => m is not MethodInfo || m.Name.StartsWith("get_") == false && m.Name.StartsWith("set_") == false).OrderBy(m => m.Name).ToArray();
-
-			if(validMembers.Length == 0) {
-				EditorUtility.DisplayDialog("No Members", "This type has no public members.", "OK");
-				return;
-			}
-
-			ActionPopupWindow.Show(() => BuildAddMembersUI(e, validMembers))
-				.ChangePosition(this.GetMousePositionForMenu(mousePosition));
-		}
-
-		/// <summary>
-		/// Builds the VisualElement UI for the 'Members of' popup
-		/// (the window auto-sizes to this content via ActionPopupWindow).
-		/// </summary>
-		VisualElement BuildAddMembersUI(FavoritesDataAsset.FavoriteEntry typeEntry, MemberInfo[] members) {
+		/// <summary>Shared popup scaffold: padding, Escape-close, header.</summary>
+		VisualElement CreatePopupRoot(string title, float minWidth) {
 			var root = new VisualElement();
 			root.style.paddingTop = 8;
 			root.style.paddingBottom = 8;
 			root.style.paddingLeft = 10;
 			root.style.paddingRight = 10;
+			root.style.minWidth = minWidth;
 			root.focusable = true;
 			root.RegisterCallback<KeyDownEvent>(evt => {
 				if(evt.keyCode == KeyCode.Escape) {
@@ -1998,95 +1746,158 @@ namespace MaxyGames.UNode.Editors {
 					evt.StopPropagation();
 				}
 			});
-
-			root.Add(new Label("Members of " + GetDisplayName(typeEntry)) {
+			root.Add(new Label(title) {
 				style = { unityFontStyleAndWeight = FontStyle.Bold, marginBottom = 6 }
 			});
+			return root;
+		}
 
-			var toggles = new List<(Toggle toggle, MemberInfo member)>();
-			void RefreshToggles() {
-				foreach(var entry in toggles) {
-					entry.toggle.SetValueWithoutNotify(IsMemberVisible(typeEntry, entry.member));
+		Button PopupButton(string text, Action onClick) => new Button(onClick) { text = text };
+
+		void OpenAddMembersPopup(Vector2 mousePosition) {
+			if(selectedEntry == null || selectedEntry.isVirtualChild) return;
+			ActionPopupWindow.Show(() => {
+				// Namespace favorites manage their generated TYPE list instead.
+				if(selectedEntry.entry.kind == FavoriteKind.Namespace)
+					return BuildVisibilityPopup(
+						"Types of " + GetDisplayName(selectedEntry.entry),
+						selectedEntry.entry, isNamespaceMode: true);
+				if(selectedEntry.entry.kind != FavoriteKind.Type || selectedEntry.entry.isVirtual)
+					return null;
+				var type = ResolveTypeSafe(selectedEntry.entry);
+				if(type == null) return null;
+
+				var validMembers = EditorReflectionUtility.GetSortedMembers(type, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+					.Where(m => m is not MethodInfo || m.Name.StartsWith("get_") == false && m.Name.StartsWith("set_") == false).ToArray();
+				if(validMembers.Length == 0) {
+					EditorUtility.DisplayDialog("No Members", "This type has no public members.", "OK");
+					return null;
 				}
+				return BuildVisibilityPopup(
+					"Members of " + GetDisplayName(selectedEntry.entry),
+					selectedEntry.entry, isNamespaceMode: false, members: validMembers);
+			}).ChangePosition(this.GetMousePositionForMenu(mousePosition));
+		}
+
+		/// <summary>
+		/// Shared include/exclude popup for a type's members or a namespace's types.
+		/// Rows: [icon][toggle][rich label]; toolbar: mode switch + bulk ops.
+		/// </summary>
+		VisualElement BuildVisibilityPopup(string title,
+			FavoritesDataAsset.FavoriteEntry owner, bool isNamespaceMode, MemberInfo[] members = null) {
+
+			Func<string, bool> isVisible = isNamespaceMode
+				? (Func<string, bool>)(name => FavoritesManager.IsTypeNameVisibleIn(owner, name))
+				: name => {
+					var m = Array.Find(members, mm => mm.Name == name);
+					return m != null && IsMemberVisible(owner, m);
+				};
+			void SetVisible(string name, bool visible) {
+				if(isNamespaceMode) {
+					SetTypeNameVisible(owner, name, visible);
+				}
+				else {
+					var m = Array.Find(members, mm => mm.Name == name);
+					if(m != null) SetMemberVisible(owner, m, visible);
+				}
+			}
+
+			var root = CreatePopupRoot(title, isNamespaceMode ? 400f : 440f);
+
+			var toggles = new List<(Toggle toggle, string name)>();
+			void RefreshToggles() {
+				foreach(var t in toggles)
+					t.toggle.SetValueWithoutNotify(isVisible(t.name));
 			}
 
 			// ── Toolbar: mode switch / Select All / Deselect All / spacer / Close ──
 			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6, flexWrap = Wrap.Wrap } };
-			Button CreateToolbarButton(string text, Action onClick) {
-				return new Button(onClick) { text = text };
-			}
-
-			// Mode switch: Include All ⇄ Exclude All. The persisted name list is
-			// preserved — its meaning (hidden ⇄ visible) flips with the mode.
-			var includeBtn = CreateToolbarButton("Include All", null);
-			var excludeBtn = CreateToolbarButton("Exclude All", null);
+			var includeBtn = PopupButton("Include All", null);
+			var excludeBtn = PopupButton("Exclude All", null);
 			void SetModeButtons(TypeMemberMode mode) {
 				bool include = mode == TypeMemberMode.IncludeAll;
 				includeBtn.SetEnabled(!include);
 				excludeBtn.SetEnabled(include);
 			}
-			includeBtn.clicked += () => {
-				if(typeEntry.memberMode == TypeMemberMode.IncludeAll) return;
-				typeEntry.memberMode = TypeMemberMode.IncludeAll;
+			void SwitchMode(TypeMemberMode mode) {
+				if(owner.memberMode == mode) return;
+				owner.memberMode = mode;
 				FavoritesManager.Save();
 				FavoritesManager.NotifyChanged();
-				SetModeButtons(typeEntry.memberMode);
+				SetModeButtons(mode);
 				RefreshToggles();
-			};
-			excludeBtn.clicked += () => {
-				if(typeEntry.memberMode == TypeMemberMode.ExcludeAll) return;
-				typeEntry.memberMode = TypeMemberMode.ExcludeAll;
-				FavoritesManager.Save();
-				FavoritesManager.NotifyChanged();
-				SetModeButtons(typeEntry.memberMode);
-				RefreshToggles();
-			};
+			}
+			includeBtn.clicked += () => SwitchMode(TypeMemberMode.IncludeAll);
+			excludeBtn.clicked += () => SwitchMode(TypeMemberMode.ExcludeAll);
 			toolbarRow.Add(includeBtn);
 			toolbarRow.Add(excludeBtn);
-			SetModeButtons(typeEntry.memberMode);
+			SetModeButtons(owner.memberMode);
 
-			void SelectAllVisible(bool visible) {
-				foreach(var m in members)
-					SetMemberVisible(typeEntry, m, visible);
+			void SetAllVisible(bool visible) {
+				foreach(var t in toggles)
+					SetVisible(t.name, visible);
 				RefreshToggles();
 			}
-			toolbarRow.Add(CreateToolbarButton("Select All", () => SelectAllVisible(true)));
-			toolbarRow.Add(CreateToolbarButton("Deselect All", () => SelectAllVisible(false)));
+			toolbarRow.Add(PopupButton("Select All", () => SetAllVisible(true)));
+			toolbarRow.Add(PopupButton("Deselect All", () => SetAllVisible(false)));
 			var spacer = new VisualElement { style = { flexGrow = 1 } };
 			toolbarRow.Add(spacer);
-			toolbarRow.Add(CreateToolbarButton("Close", () => ActionPopupWindow.CloseLast()));
+			toolbarRow.Add(PopupButton("Close", () => ActionPopupWindow.CloseLast()));
 			root.Add(toolbarRow);
 
-			// ── Member list ──
-			var scroll = new ScrollView(ScrollViewMode.Vertical) { style = { maxHeight = 360 } };
-			foreach(var m in members) {
-				bool current = IsMemberVisible(typeEntry, m);
-				var row = new VisualElement {
-					style = {
-						flexDirection = FlexDirection.Row, alignItems = Align.Center,
-						marginTop = 1, marginBottom = 1
-					}
-				};
-				var toggle = new Toggle() { value = current };
-				MemberInfo captured = m;
-				toggle.RegisterValueChangedCallback(evt => SetMemberVisible(typeEntry, captured, evt.newValue));
-				row.Add(toggle);
-
-				var icon = new Image { image = GetMemberKindIcon(m) };
-				icon.style.width = 16;
-				icon.style.height = 16;
-				icon.style.flexShrink = 0;
-				icon.style.marginRight = 4;
-				row.Add(icon);
-
-				var label = new Label(EditorReflectionUtility.GetRichMemberName(m)) { enableRichText = true };
-				row.Add(label);
-
-				scroll.Add(row);
-				toggles.Add((toggle, m));
+			// ── Entries ──
+			if(isNamespaceMode) {
+				var candidates = FavoritesManager.GetVirtualNamespaceChildren(owner, true);
+				var scroll = new ScrollView(ScrollViewMode.Vertical) { style = { maxHeight = 340 } };
+				foreach(var cand in candidates) {
+					var row = CreateToggleRow(
+						FavoritesManager.IsTypeNameVisibleIn(owner, cand.displayName),
+						uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.FolderIcon)),
+						cand.displayName,
+						v => SetVisible(cand.displayName, v));
+					scroll.Add(row.row);
+					toggles.Add((row.toggle, cand.displayName));
+				}
+				root.Add(scroll);
 			}
-			root.Add(scroll);
+			else {
+				var scroll = new ScrollView(ScrollViewMode.Vertical) { style = { maxHeight = 360 } };
+				foreach(var m in members) {
+					Texture iconTex = null;
+					try { iconTex = uNodeEditorUtility.GetIcon(m); } catch { }
+					var row = CreateToggleRow(
+						isVisible(m.Name),
+						iconTex ?? GetMemberKindIcon(m),
+						EditorReflectionUtility.GetRichMemberName(m),
+						v => SetVisible(m.Name, v),
+						richText: true);
+					scroll.Add(row.row);
+					toggles.Add((row.toggle, m.Name));
+				}
+				root.Add(scroll);
+			}
 			return root;
+		}
+
+		(Toggle toggle, VisualElement row) CreateToggleRow(bool value, Texture icon,
+			string labelText, Action<bool> onToggle, bool richText = false) {
+			var row = new VisualElement {
+				style = { flexDirection = FlexDirection.Row, alignItems = Align.Center, marginTop = 1, marginBottom = 1 }
+			};
+			var toggle = new Toggle { value = value };
+			toggle.style.marginRight = 4;
+			toggle.RegisterValueChangedCallback(evt => onToggle?.Invoke(evt.newValue));
+			row.Add(toggle);
+			var img = new Image { image = icon };
+			img.style.width = 16;
+			img.style.height = 16;
+			img.style.flexShrink = 0;
+			img.style.marginRight = 4;
+			row.Add(img);
+			var lbl = new Label(labelText) { enableRichText = richText };
+			lbl.style.flexGrow = 1;
+			row.Add(lbl);
+			return (toggle, row);
 		}
 
 		/// <summary>Kind icon for a reflected member (method/property/field).</summary>
@@ -2120,8 +1931,7 @@ namespace MaxyGames.UNode.Editors {
 					kind = FavoriteKind.Node,
 					nodeMenuName = menu.name,
 					displayName = menu.name,
-					// Store the node's type so the menu can be resolved even if
-					// its registered name changes.
+					// Store the node's type so the menu survives name changes.
 					targetType = menu.type != null ? new SerializedType(menu.type) : null,
 				});
 			}
@@ -2132,8 +1942,8 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		void OpenAddNodePopup(Vector2 mousePosition) {
-			var parentEntry = ResolveIntentParent(x => x.kind == FavoriteKind.Folder || x.kind == FavoriteKind.Namespace);
-			ActionPopupWindow.Show(() => BuildAddNodeUI(parentEntry))
+			var parent = ResolveIntentParent(x => x.kind == FavoriteKind.Folder || x.kind == FavoriteKind.Namespace);
+			ActionPopupWindow.Show(() => BuildAddNodePopup(parent))
 				.ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
@@ -2162,28 +1972,11 @@ namespace MaxyGames.UNode.Editors {
 
 		/// <summary>
 		/// Builds the 'Add Nodes' popup content using a virtualized TreeView with a
-		/// search field — the node registry is large, so rows must be recycled.
-		/// Category paths ('/') are respected: unfiltered view groups nodes into an
-		/// expandable category tree; searching switches to a flat results list.
+		/// search field. Unfiltered view groups nodes by their '/'-separated
+		/// categories; searching switches to a flat results list.
 		/// </summary>
-		VisualElement BuildAddNodeUI(FavoritesDataAsset.FavoriteEntry parent) {
-			var root = new VisualElement();
-			root.style.paddingTop = 8;
-			root.style.paddingBottom = 8;
-			root.style.paddingLeft = 10;
-			root.style.paddingRight = 10;
-			root.style.minWidth = 440;
-			root.focusable = true;
-			root.RegisterCallback<KeyDownEvent>(evt => {
-				if(evt.keyCode == KeyCode.Escape) {
-					ActionPopupWindow.CloseLast();
-					evt.StopPropagation();
-				}
-			});
-
-			root.Add(new Label("Add Nodes") {
-				style = { unityFontStyleAndWeight = FontStyle.Bold, marginBottom = 6 }
-			});
+		VisualElement BuildAddNodePopup(FavoritesDataAsset.FavoriteEntry parent) {
+			var root = CreatePopupRoot("Add Nodes", 440);
 
 			var allNodes = nodeMenuCache.Values
 				.OrderBy(m => m.category, StringComparer.OrdinalIgnoreCase)
@@ -2244,7 +2037,6 @@ namespace MaxyGames.UNode.Editors {
 				flatMode = !string.IsNullOrEmpty(filterText);
 
 				if(flatMode) {
-					// Flat relevance-style list: quick "find one node" mode.
 					foreach(var m in allNodes) {
 						if(!MatchesFilter(m))
 							continue;
@@ -2253,13 +2045,12 @@ namespace MaxyGames.UNode.Editors {
 				}
 				else {
 					// Respect the '/' separator: build a category tree.
-					var root = new NodeGroupNode();
+					var rootNode = new NodeGroupNode();
 					foreach(var m in allNodes) {
 						var cat = string.IsNullOrEmpty(m.category) ? "Uncategorized" : m.category;
-						var segs = cat.Split('/');
-						var cur = root;
+						var cur = rootNode;
 						string path = string.Empty;
-						foreach(var seg in segs) {
+						foreach(var seg in cat.Split('/')) {
 							path = string.IsNullOrEmpty(path) ? seg : path + "/" + seg;
 							if(!cur.dirs.TryGetValue(seg, out var next)) {
 								next = new NodeGroupNode { segment = seg, fullPath = path };
@@ -2269,7 +2060,7 @@ namespace MaxyGames.UNode.Editors {
 						}
 						cur.menus.Add(m);
 					}
-					items.AddRange(EmitChildren(root));
+					items.AddRange(EmitChildren(rootNode));
 				}
 
 				typeTree?.SetRootItems(items);
@@ -2295,14 +2086,13 @@ namespace MaxyGames.UNode.Editors {
 			});
 			root.Add(searchField);
 
-			// ── Toolbar: Select All / Deselect All / spacer / Close ──
+			// ── Toolbar ──
 			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6 } };
-			Button CreateToolbarButton(string text, Action onClick) => new Button(onClick) { text = text };
-			toolbarRow.Add(CreateToolbarButton("Select All", () => { SetAllVisible(true); RefreshRows(); }));
-			toolbarRow.Add(CreateToolbarButton("Deselect All", () => { SetAllVisible(false); RefreshRows(); }));
+			toolbarRow.Add(PopupButton("Select All", () => { SetAllVisible(true); RefreshRows(); }));
+			toolbarRow.Add(PopupButton("Deselect All", () => { SetAllVisible(false); RefreshRows(); }));
 			var toolbarSpacer = new VisualElement { style = { flexGrow = 1 } };
 			toolbarRow.Add(toolbarSpacer);
-			toolbarRow.Add(CreateToolbarButton("Close", () => ActionPopupWindow.CloseLast()));
+			toolbarRow.Add(PopupButton("Close", () => ActionPopupWindow.CloseLast()));
 			root.Add(toolbarRow);
 
 			// ── Virtualized node list ──
@@ -2380,202 +2170,6 @@ namespace MaxyGames.UNode.Editors {
 			return root;
 		}
 
-		/// <summary>Recycled row for the namespace types TreeView popup.</summary>
-		class TypeToggleRow : VisualElement {
-			public Toggle toggle;
-			public Image icon;
-			public Label label;
-			public Action<bool> onToggle;
-		}
-
-		/// <summary>
-		/// Builds the 'Types of' popup content using a virtualized TreeView —
-		/// namespaces can expose many types, so rows must be recycled.
-		/// </summary>
-		VisualElement BuildNamespaceTypesUI(FavoritesDataAsset.FavoriteEntry nsEntry) {
-			var root = new VisualElement();
-			root.style.paddingTop = 8;
-			root.style.paddingBottom = 8;
-			root.style.paddingLeft = 10;
-			root.style.paddingRight = 10;
-			root.style.minWidth = 400;
-			root.focusable = true;
-			root.RegisterCallback<KeyDownEvent>(evt => {
-				if(evt.keyCode == KeyCode.Escape) {
-					ActionPopupWindow.CloseLast();
-					evt.StopPropagation();
-				}
-			});
-
-			root.Add(new Label("Types of " + GetDisplayName(nsEntry)) {
-				style = { unityFontStyleAndWeight = FontStyle.Bold, marginBottom = 6 }
-			});
-
-			var candidates = FavoritesManager.GetVirtualNamespaceChildren(nsEntry, true);
-
-			// Stable ids derived from the entry id (hash + collision probe), built
-			// up-front so bindItem can resolve data by index without a self-reference.
-			var usedIDs = new HashSet<int>();
-			var items = new List<TreeViewItemData<FavoritesDataAsset.FavoriteEntry>>(candidates.Count);
-			foreach(var cand in candidates) {
-				int id = cand.id.GetHashCode();
-				while(!usedIDs.Add(id))
-					id++;
-				items.Add(new TreeViewItemData<FavoritesDataAsset.FavoriteEntry>(id, cand));
-			}
-
-			TreeView typeTree = null;
-			void RefreshRows() {
-				typeTree?.RefreshItems();
-			}
-
-			// ── Toolbar: mode switch / Select All / Deselect All / spacer / Close ──
-			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6, flexWrap = Wrap.Wrap } };
-			Button CreateToolbarButton(string text, Action onClick) => new Button(onClick) { text = text };
-
-			var includeBtn = CreateToolbarButton("Include All", null);
-			var excludeBtn = CreateToolbarButton("Exclude All", null);
-			void SetModeButtons(TypeMemberMode mode) {
-				bool include = mode == TypeMemberMode.IncludeAll;
-				includeBtn.SetEnabled(!include);
-				excludeBtn.SetEnabled(include);
-			}
-			includeBtn.clicked += () => {
-				if(nsEntry.memberMode == TypeMemberMode.IncludeAll) return;
-				nsEntry.memberMode = TypeMemberMode.IncludeAll;
-				FavoritesManager.Save();
-				FavoritesManager.NotifyChanged();
-				SetModeButtons(nsEntry.memberMode);
-				RefreshRows();
-			};
-			excludeBtn.clicked += () => {
-				if(nsEntry.memberMode == TypeMemberMode.ExcludeAll) return;
-				nsEntry.memberMode = TypeMemberMode.ExcludeAll;
-				FavoritesManager.Save();
-				FavoritesManager.NotifyChanged();
-				SetModeButtons(nsEntry.memberMode);
-				RefreshRows();
-			};
-
-			void SetAllVisible(bool visible) {
-				foreach(var c in candidates)
-					SetTypeNameVisible(nsEntry, c.displayName, visible);
-			}
-			toolbarRow.Add(includeBtn);
-			toolbarRow.Add(excludeBtn);
-			toolbarRow.Add(CreateToolbarButton("Select All", () => { SetAllVisible(true); RefreshRows(); }));
-			toolbarRow.Add(CreateToolbarButton("Deselect All", () => { SetAllVisible(false); RefreshRows(); }));
-			var toolbarSpacer = new VisualElement { style = { flexGrow = 1 } };
-			toolbarRow.Add(toolbarSpacer);
-			toolbarRow.Add(CreateToolbarButton("Close", () => ActionPopupWindow.CloseLast()));
-			root.Add(toolbarRow);
-
-			// ── Virtualized type list ──
-			typeTree = new TreeView(
-				makeItem: () => {
-					var row = new TypeToggleRow {
-						style = { flexDirection = FlexDirection.Row, alignItems = Align.Center }
-					};
-					row.toggle = new Toggle();
-					row.toggle.style.marginRight = 4;
-					row.toggle.RegisterValueChangedCallback(evt => row.onToggle?.Invoke(evt.newValue));
-					row.Add(row.toggle);
-					row.icon = new Image();
-					row.icon.style.width = 16;
-					row.icon.style.height = 16;
-					row.icon.style.flexShrink = 0;
-					row.icon.style.marginRight = 4;
-					row.Add(row.icon);
-					row.label = new Label();
-					row.label.style.flexGrow = 1;
-					row.Add(row.label);
-					return row;
-				},
-				bindItem: (ve, index) => {
-					if(!(ve is TypeToggleRow row))
-						return;
-					if(index < 0 || index >= items.Count)
-						return;
-					var entry = items[index].data;
-					Type t = null;
-					try { t = entry.targetType?.type; } catch { }
-					string typeName = entry.displayName ?? t?.Name ?? string.Empty;
-					row.toggle.SetValueWithoutNotify(FavoritesManager.IsTypeNameVisibleIn(nsEntry, typeName));
-					row.onToggle = v => SetTypeNameVisible(nsEntry, typeName, v);
-					row.icon.image = t != null ? uNodeEditorUtility.GetTypeIcon(t) : null;
-					row.label.text = t != null ? t.PrettyName() : typeName;
-				}
-			);
-			typeTree.style.height = 340;
-			typeTree.style.flexGrow = 1;
-			typeTree.virtualizationMethod = CollectionVirtualizationMethod.FixedHeight;
-			typeTree.fixedItemHeight = 20;
-			typeTree.selectionType = SelectionType.None;
-			typeTree.showAlternatingRowBackgrounds = AlternatingRowBackground.All;
-			typeTree.SetRootItems(items);
-			typeTree.Rebuild();
-			root.Add(typeTree);
-			return root;
-		}
-
-		static bool IsMemberVisible(FavoritesDataAsset.FavoriteEntry typeEntry, MemberInfo member) {
-			if(typeEntry == null || member == null)
-				return false;
-			bool inList = typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(member.Name);
-			return typeEntry.memberMode == TypeMemberMode.ExcludeAll ? inList : !inList;
-		}
-
-		/// <summary>
-		/// Shows/hides a generated member. The write flips with the type's
-		/// memberMode so the persisted name list keeps a single meaning per mode:
-		/// hidden names in IncludeAll, visible names in ExcludeAll.
-		/// </summary>
-		void SetMemberVisible(FavoritesDataAsset.FavoriteEntry typeEntry, MemberInfo member, bool visible) {
-			if(typeEntry == null || member == null)
-				return;
-			if(typeEntry.excludedMembers == null)
-				typeEntry.excludedMembers = new List<string>();
-			string name = member.Name;
-			bool shouldContain = typeEntry.memberMode == TypeMemberMode.ExcludeAll ? visible : !visible;
-			bool changed;
-			if(shouldContain) {
-				if(!typeEntry.excludedMembers.Contains(name)) {
-					typeEntry.excludedMembers.Add(name);
-					changed = true;
-				}
-				else {
-					changed = false;
-				}
-			}
-			else {
-				changed = typeEntry.excludedMembers.Remove(name);
-			}
-			if(changed) {
-				FavoritesManager.Save();
-				FavoritesManager.NotifyChanged();
-			}
-		}
-
-		void ShowAutoSortMenu() {
-			var menu = new GenericMenu();
-			menu.AddItem(new GUIContent("Name (A-Z)"), false, () => AutoSort((a, b) => string.Compare(GetDisplayName(a), GetDisplayName(b), StringComparison.OrdinalIgnoreCase)));
-			menu.AddItem(new GUIContent("Name (Z-A)"), false, () => AutoSort((a, b) => string.Compare(GetDisplayName(b), GetDisplayName(a), StringComparison.OrdinalIgnoreCase)));
-			menu.AddItem(new GUIContent("Kind"), false, () => AutoSort((a, b) => {
-				int c = ((int)a.kind).CompareTo((int)b.kind);
-				return c != 0 ? c : string.Compare(GetDisplayName(a), GetDisplayName(b), StringComparison.OrdinalIgnoreCase);
-			}));
-			menu.ShowAsContext();
-		}
-
-		void AutoSort(Comparison<FavoritesDataAsset.FavoriteEntry> comparer) {
-			var parent = selectedEntry != null && selectedEntry.entry.CanHaveChilds ? selectedEntry.entry : null;
-			FavoritesManager.SortChildren(parent, CurrentCategory, (a, b) => {
-				int tc = a.kind.CompareTo(b.kind);
-				return tc != 0 ? tc : comparer(a, b);
-			});
-			ReloadTreeView();
-		}
-
 		/// <summary>Double-click/context-menu entry point: validates then spawns the node.</summary>
 		void TryCreateNode(DisplayEntry de) {
 			if(de == null || de.entry == null || de.isPlaceholder) return;
@@ -2597,17 +2191,14 @@ namespace MaxyGames.UNode.Editors {
 		/// <summary>
 		/// Payload for dragging an entry onto the graph editor — matches the
 		/// NodeBrowser/graph contract under the "uNode" generic key:
-		/// System.Type for type items, reflected MemberInfo for member items.
-		/// Returns null when the item cannot be dragged to a graph.
+		/// System.Type / MemberInfo / NodeMenu. Null = not graph-draggable.
 		/// </summary>
 		object GetGraphDragPayload(FavoritesDataAsset.FavoriteEntry e) {
 			if(e == null)
 				return null;
 			switch(e.kind) {
-				case FavoriteKind.Type: {
-					try { return ResolveEntryType(e); }
-					catch { return null; }
-				}
+				case FavoriteKind.Type:
+					return ResolveTypeSafe(e);
 				case FavoriteKind.Member: {
 					MemberInfo mi = null;
 					try { mi = FavoritesManager.GetEntryMember(e); } catch { }
@@ -2617,29 +2208,23 @@ namespace MaxyGames.UNode.Editors {
 					return null;
 				}
 				case FavoriteKind.Node:
-					// UGraphView natively handles a NodeMenu payload.
 					return ResolveNodeMenu(e);
 				default:
 					return null;
 			}
 		}
 
-		/// <summary>
-		/// Resolves the NodeMenu of a node favorite: primarily by its stored
-		/// targetType (the node's declaring type), falling back to the menu name.
-		/// </summary>
+		/// <summary>Resolves the NodeMenu primarily by targetType (stable against
+		/// registered-name changes), falling back to the menu name.</summary>
 		NodeMenu ResolveNodeMenu(FavoritesDataAsset.FavoriteEntry e) {
 			if(nodeMenuCache == null)
 				return null;
-			// 1) By stored node type — stable even if the registered name changes.
-			Type t = null;
-			try { t = e.resolvedType; } catch { }
+			Type t = ResolveTypeSafe(e);
 			if(t != null) {
 				var byType = nodeMenuCache.Values.FirstOrDefault(m => m.type == t);
 				if(byType != null)
 					return byType;
 			}
-			// 2) Fallback: by stored menu name (legacy entries).
 			if(!string.IsNullOrEmpty(e.nodeMenuName) && nodeMenuCache.TryGetValue(e.nodeMenuName, out var byName))
 				return byName;
 			return null;

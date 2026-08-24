@@ -131,20 +131,6 @@ namespace MaxyGames.UNode.Editors {
 				}
 			}
 
-			public bool isValid {
-				get {
-					switch(kind) {
-						case FavoriteKind.Member:
-							return rawMember != null && !string.IsNullOrEmpty(memberName);
-						case FavoriteKind.Folder:
-						case FavoriteKind.Namespace:
-							return !string.IsNullOrEmpty(displayName);
-						default:
-							return targetType != null && targetType.isAssigned || kind == FavoriteKind.Node && !string.IsNullOrEmpty(nodeMenuName);
-					}
-				}
-			}
-
 			/// <summary>True when this entry can contain serialized child entries.</summary>
 			public bool CanHaveChilds =>
 				kind == FavoriteKind.Folder || kind == FavoriteKind.Namespace;
@@ -275,13 +261,6 @@ namespace MaxyGames.UNode.Editors {
 			Save();
 			RaiseChanged();
 		}
-
-		public static void RenameCategory(FavoritesDataAsset.FavoriteCategory category, string newName) {
-			if(category == null || string.IsNullOrWhiteSpace(newName)) return;
-			category.name = newName.Trim();
-			Save();
-			RaiseChanged();
-		}
 		#endregion
 
 		#region Tree Access
@@ -314,12 +293,6 @@ namespace MaxyGames.UNode.Editors {
 				foreach(var e in Flatten(cat))
 					yield return e;
 			}
-		}
-
-		public static FavoritesDataAsset.FavoriteEntry FindEntry(string entryID) {
-			if(string.IsNullOrEmpty(entryID))
-				return null;
-			return FlattenAll().FirstOrDefault(e => e.id == entryID);
 		}
 
 		/// <summary>(Re)assigns runtime parent references for a whole category.</summary>
