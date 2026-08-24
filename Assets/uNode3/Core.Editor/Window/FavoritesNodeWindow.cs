@@ -1348,7 +1348,7 @@ namespace MaxyGames.UNode.Editors {
 			entryTreeView.AddManipulator(new ContextualMenuManipulator(evt => {
 				evt.menu.AppendAction("New Folder", a => { SetPendingParent(null); CreateNewFolder(a.eventInfo.mousePosition); });
 				evt.menu.AppendAction("Add Namespace", a => { SetPendingParent(null); AddNamespaceFavorite(a.eventInfo.mousePosition); });
-				evt.menu.AppendAction("Add Type / Member", a => { SetPendingParent(null); OpenItemSelector(a.eventInfo.mousePosition); });
+				evt.menu.AppendAction("Add Type or Member", a => { SetPendingParent(null); OpenItemSelector(a.eventInfo.mousePosition); });
 			}));
 			// Last-chance snapshot when the tree detaches (window closing).
 			entryTreeView.RegisterCallback<DetachFromPanelEvent>(_ => SnapshotExpandedState());
@@ -1519,7 +1519,7 @@ namespace MaxyGames.UNode.Editors {
 					evt.menu.AppendAction("Rename", _ => { selectedEntry = de; RenameSelectedFolder(); });
 					evt.menu.AppendSeparator();
 					evt.menu.AppendAction("Add Namespace", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); AddNamespaceFavorite(e.eventInfo.mousePosition); });
-					evt.menu.AppendAction("Add Type / Member", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Type or Member", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(e.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Type:
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
