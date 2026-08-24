@@ -238,7 +238,7 @@ namespace MaxyGames.UNode.Editors {
 			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder(pos));
 			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite(pos));
 			menu.AddItem(new GUIContent("Type or Member"), false, () => OpenItemSelector(pos));
-			menu.AddItem(new GUIContent("Node"), false, () => OpenAddNodePopup());
+			menu.AddItem(new GUIContent("Node"), false, () => OpenAddNodePopup(pos));
 			menu.AddSeparator("");
 			menu.AddItem(new GUIContent("Category"), false, () => CreateNewCategory(pos));
 			menu.ShowAsContext();
@@ -1385,7 +1385,7 @@ namespace MaxyGames.UNode.Editors {
 				evt.menu.AppendAction("New Folder", a => { SetPendingParent(null); CreateNewFolder(a.eventInfo.mousePosition); });
 				evt.menu.AppendAction("Add Namespace", a => { SetPendingParent(null); AddNamespaceFavorite(a.eventInfo.mousePosition); });
 				evt.menu.AppendAction("Add Type / Member", a => { SetPendingParent(null); OpenItemSelector(a.eventInfo.mousePosition); });
-				evt.menu.AppendAction("Add Node...", a => { SetPendingParent(null); OpenAddNodePopup(); });
+				evt.menu.AppendAction("Add Node...", a => { SetPendingParent(null); OpenAddNodePopup(a.eventInfo.mousePosition); });
 			}));
 			// Last-chance snapshot when the tree detaches (window closing).
 			entryTreeView.RegisterCallback<DetachFromPanelEvent>(_ => SnapshotExpandedState());
@@ -1587,7 +1587,7 @@ namespace MaxyGames.UNode.Editors {
 					evt.menu.AppendSeparator();
 					evt.menu.AppendAction("Add Namespace", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); AddNamespaceFavorite(e.eventInfo.mousePosition); });
 					evt.menu.AppendAction("Add Type / Member", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(e.eventInfo.mousePosition); });
-					evt.menu.AppendAction("Add Node...", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); OpenAddNodePopup(); });
+					evt.menu.AppendAction("Add Node...", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); OpenAddNodePopup(e.eventInfo.mousePosition); });
 					break;
 				case FavoriteKind.Type:
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
@@ -1978,7 +1978,7 @@ namespace MaxyGames.UNode.Editors {
 			}
 
 			ActionPopupWindow.Show(() => BuildAddMembersUI(e, validMembers))
-				.ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
+				.ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
 		/// <summary>
@@ -2131,10 +2131,10 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		void OpenAddNodePopup() {
+		void OpenAddNodePopup(Vector2 mousePosition) {
 			var parentEntry = ResolveIntentParent(x => x.kind == FavoriteKind.Folder || x.kind == FavoriteKind.Namespace);
 			ActionPopupWindow.Show(() => BuildAddNodeUI(parentEntry))
-				.ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
+				.ChangePosition(this.GetMousePositionForMenu(mousePosition));
 		}
 
 		/// <summary>Row for the add-node TreeView popup.</summary>
@@ -2146,9 +2146,25 @@ namespace MaxyGames.UNode.Editors {
 			public Action<bool> onToggle;
 		}
 
+		/// <summary>Tree item for the add-node popup: a category group or a node leaf.</summary>
+		class NodePickerItem {
+			public bool isGroup;
+			public string groupName;   // full category path (groups only)
+			public NodeMenu menu;      // null for groups
+		}
+
+		class NodeGroupNode {
+			public string fullPath;
+			public string segment;
+			public Dictionary<string, NodeGroupNode> dirs = new Dictionary<string, NodeGroupNode>(StringComparer.OrdinalIgnoreCase);
+			public List<NodeMenu> menus = new List<NodeMenu>();
+		}
+
 		/// <summary>
 		/// Builds the 'Add Nodes' popup content using a virtualized TreeView with a
 		/// search field — the node registry is large, so rows must be recycled.
+		/// Category paths ('/') are respected: unfiltered view groups nodes into an
+		/// expandable category tree; searching switches to a flat results list.
 		/// </summary>
 		VisualElement BuildAddNodeUI(FavoritesDataAsset.FavoriteEntry parent) {
 			var root = new VisualElement();
@@ -2176,7 +2192,9 @@ namespace MaxyGames.UNode.Editors {
 
 			TreeView typeTree = null;
 			string filterText = "";
-			var items = new List<TreeViewItemData<NodeMenu>>();
+			bool flatMode = false;
+			var items = new List<TreeViewItemData<NodePickerItem>>();
+			var displayedMenus = new List<NodeMenu>(); // leaves currently shown (bulk ops target)
 			var usedIDs = new HashSet<int>();
 
 			bool MatchesFilter(NodeMenu m) {
@@ -2186,19 +2204,78 @@ namespace MaxyGames.UNode.Editors {
 					(m.category != null && m.category.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0);
 			}
 
+			int ProbeID(string key) {
+				int id = key.GetHashCode();
+				while(!usedIDs.Add(id))
+					id++;
+				return id;
+			}
+
+			void AddLeaf(NodeMenu m, List<TreeViewItemData<NodePickerItem>> into) {
+				int id = ProbeID("leaf:" + m.name + ":" + m.category);
+				displayedMenus.Add(m);
+				into.Add(new TreeViewItemData<NodePickerItem>(id, new NodePickerItem { menu = m }));
+			}
+
+			void EmitGroup(NodeGroupNode node, List<TreeViewItemData<NodePickerItem>> into) {
+				int id = ProbeID("group:" + node.fullPath);
+				var item = new TreeViewItemData<NodePickerItem>(
+					id,
+					new NodePickerItem { isGroup = true, groupName = node.fullPath },
+					EmitChildren(node));
+				into.Add(item);
+			}
+
+			List<TreeViewItemData<NodePickerItem>> EmitChildren(NodeGroupNode node) {
+				var into = new List<TreeViewItemData<NodePickerItem>>();
+				foreach(var dir in node.dirs.Values.OrderBy(d => d.segment, StringComparer.OrdinalIgnoreCase)) {
+					EmitGroup(dir, into);
+				}
+				foreach(var m in node.menus.OrderBy(mm => mm.name, StringComparer.OrdinalIgnoreCase)) {
+					AddLeaf(m, into);
+				}
+				return into;
+			}
+
 			void ApplyFilter() {
 				items.Clear();
+				displayedMenus.Clear();
 				usedIDs.Clear();
-				foreach(var m in allNodes) {
-					if(!MatchesFilter(m))
-						continue;
-					int id = m.name.GetHashCode();
-					while(!usedIDs.Add(id))
-						id++;
-					items.Add(new TreeViewItemData<NodeMenu>(id, m));
+				flatMode = !string.IsNullOrEmpty(filterText);
+
+				if(flatMode) {
+					// Flat relevance-style list: quick "find one node" mode.
+					foreach(var m in allNodes) {
+						if(!MatchesFilter(m))
+							continue;
+						AddLeaf(m, items);
+					}
 				}
+				else {
+					// Respect the '/' separator: build a category tree.
+					var root = new NodeGroupNode();
+					foreach(var m in allNodes) {
+						var cat = string.IsNullOrEmpty(m.category) ? "Uncategorized" : m.category;
+						var segs = cat.Split('/');
+						var cur = root;
+						string path = string.Empty;
+						foreach(var seg in segs) {
+							path = string.IsNullOrEmpty(path) ? seg : path + "/" + seg;
+							if(!cur.dirs.TryGetValue(seg, out var next)) {
+								next = new NodeGroupNode { segment = seg, fullPath = path };
+								cur.dirs[seg] = next;
+							}
+							cur = next;
+						}
+						cur.menus.Add(m);
+					}
+					items.AddRange(EmitChildren(root));
+				}
+
 				typeTree?.SetRootItems(items);
 				typeTree?.Rebuild();
+				if(!flatMode)
+					typeTree?.ExpandAll(); // category groups start expanded
 			}
 
 			void RefreshRows() {
@@ -2206,8 +2283,8 @@ namespace MaxyGames.UNode.Editors {
 			}
 
 			void SetAllVisible(bool visible) {
-				foreach(var item in items)
-					SetNodeFavorite(item.data, parent, visible);
+				foreach(var m in displayedMenus)
+					SetNodeFavorite(m, parent, visible);
 			}
 
 			// ── Search ──
@@ -2261,7 +2338,21 @@ namespace MaxyGames.UNode.Editors {
 						return;
 					if(index < 0 || index >= items.Count)
 						return;
-					var menu = items[index].data;
+					var data = items[index].data;
+
+					if(data.isGroup) {
+						// Category group row: folder icon + name, no toggle.
+						row.toggle.SetValueWithoutNotify(false);
+						row.onToggle = null;
+						row.toggle.style.display = DisplayStyle.None;
+						row.icon.image = uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.FolderIcon));
+						row.label.text = data.groupName.Substring(data.groupName.LastIndexOf('/') + 1);
+						row.categoryLabel.text = string.Empty;
+						return;
+					}
+
+					var menu = data.menu;
+					row.toggle.style.display = DisplayStyle.Flex;
 					row.toggle.SetValueWithoutNotify(IsNodeFavorited(menu));
 					row.onToggle = v => SetNodeFavorite(menu, parent, v);
 					Texture iconTex = null;
@@ -2272,7 +2363,8 @@ namespace MaxyGames.UNode.Editors {
 					catch { }
 					row.icon.image = iconTex;
 					row.label.text = menu.name;
-					row.categoryLabel.text = menu.category;
+					// Category hint is useful only in the flat search list.
+					row.categoryLabel.text = flatMode ? menu.category : string.Empty;
 				}
 			);
 			typeTree.style.height = 360;
