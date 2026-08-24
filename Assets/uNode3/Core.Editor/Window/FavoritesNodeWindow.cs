@@ -2120,6 +2120,9 @@ namespace MaxyGames.UNode.Editors {
 					kind = FavoriteKind.Node,
 					nodeMenuName = menu.name,
 					displayName = menu.name,
+					// Store the node's type so the menu can be resolved even if
+					// its registered name changes.
+					targetType = menu.type != null ? new SerializedType(menu.type) : null,
 				});
 			}
 			else {
@@ -2528,18 +2531,24 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>
-		/// Resolves the NodeMenu of a node favorite: by its stored menu name,
-		/// falling back to a type match within the cached menus.
+		/// Resolves the NodeMenu of a node favorite: primarily by its stored
+		/// targetType (the node's declaring type), falling back to the menu name.
 		/// </summary>
 		NodeMenu ResolveNodeMenu(FavoritesDataAsset.FavoriteEntry e) {
-			NodeMenu menu = null;
-			if(!string.IsNullOrEmpty(e.nodeMenuName) && nodeMenuCache != null)
-				nodeMenuCache.TryGetValue(e.nodeMenuName, out menu);
-			if(menu == null && nodeMenuCache != null) {
-				try { menu = nodeMenuCache.Values.FirstOrDefault(m => m.type == ResolveEntryType(e)); }
-				catch { }
+			if(nodeMenuCache == null)
+				return null;
+			// 1) By stored node type — stable even if the registered name changes.
+			Type t = null;
+			try { t = e.resolvedType; } catch { }
+			if(t != null) {
+				var byType = nodeMenuCache.Values.FirstOrDefault(m => m.type == t);
+				if(byType != null)
+					return byType;
 			}
-			return menu;
+			// 2) Fallback: by stored menu name (legacy entries).
+			if(!string.IsNullOrEmpty(e.nodeMenuName) && nodeMenuCache.TryGetValue(e.nodeMenuName, out var byName))
+				return byName;
+			return null;
 		}
 
 		Type ResolveEntryType(FavoritesDataAsset.FavoriteEntry e) {
