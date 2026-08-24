@@ -2336,9 +2336,11 @@ namespace MaxyGames.UNode.Editors {
 				bindItem: (ve, index) => {
 					if(!(ve is NodeToggleRow row))
 						return;
-					if(index < 0 || index >= items.Count)
+					// index is the FLATTENED row index (groups + leaves), so resolve
+					// through the tree itself rather than the root-only items list.
+					var data = typeTree.GetItemDataForIndex<NodePickerItem>(index);
+					if(data == null)
 						return;
-					var data = items[index].data;
 
 					if(data.isGroup) {
 						// Category group row: folder icon + name, no toggle.
