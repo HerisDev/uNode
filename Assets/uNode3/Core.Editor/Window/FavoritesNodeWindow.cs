@@ -224,6 +224,7 @@ namespace MaxyGames.UNode.Editors {
 			menu.AddItem(new GUIContent("Folder"), false, () => CreateNewFolder(pos));
 			menu.AddItem(new GUIContent("Namespace"), false, () => AddNamespaceFavorite(pos));
 			menu.AddItem(new GUIContent("Type or Member"), false, () => OpenItemSelector(pos));
+			menu.AddItem(new GUIContent("Node"), false, () => OpenAddNodePopup());
 			menu.AddSeparator("");
 			menu.AddItem(new GUIContent("Category"), false, () => CreateNewCategory(pos));
 			menu.ShowAsContext();
@@ -1348,7 +1349,8 @@ namespace MaxyGames.UNode.Editors {
 			entryTreeView.AddManipulator(new ContextualMenuManipulator(evt => {
 				evt.menu.AppendAction("New Folder", a => { SetPendingParent(null); CreateNewFolder(a.eventInfo.mousePosition); });
 				evt.menu.AppendAction("Add Namespace", a => { SetPendingParent(null); AddNamespaceFavorite(a.eventInfo.mousePosition); });
-				evt.menu.AppendAction("Add Type or Member", a => { SetPendingParent(null); OpenItemSelector(a.eventInfo.mousePosition); });
+				evt.menu.AppendAction("Add Type / Member", a => { SetPendingParent(null); OpenItemSelector(a.eventInfo.mousePosition); });
+				evt.menu.AppendAction("Add Node...", a => { SetPendingParent(null); OpenAddNodePopup(); });
 			}));
 			// Last-chance snapshot when the tree detaches (window closing).
 			entryTreeView.RegisterCallback<DetachFromPanelEvent>(_ => SnapshotExpandedState());
@@ -1519,7 +1521,8 @@ namespace MaxyGames.UNode.Editors {
 					evt.menu.AppendAction("Rename", _ => { selectedEntry = de; RenameSelectedFolder(); });
 					evt.menu.AppendSeparator();
 					evt.menu.AppendAction("Add Namespace", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); AddNamespaceFavorite(e.eventInfo.mousePosition); });
-					evt.menu.AppendAction("Add Type or Member", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Type / Member", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); UpdateAddMembersButton(); OpenItemSelector(e.eventInfo.mousePosition); });
+					evt.menu.AppendAction("Add Node...", e => { selectedEntry = de; SetPendingParent(de.entry); UpdateDetailPanel(); OpenAddNodePopup(); });
 					break;
 				case FavoriteKind.Type:
 					evt.menu.AppendAction("Create Node", _ => TryCreateNode(de));
@@ -2026,6 +2029,188 @@ namespace MaxyGames.UNode.Editors {
 			return uNodeEditorUtility.GetTypeIcon(typeof(TypeIcons.ExtensionIcon));
 		}
 
+		bool IsNodeFavorited(NodeMenu menu) {
+			return menu != null && FavoritesManager.asset.entries.Any(x =>
+				x.categoryID == currentCategoryID && x.kind == FavoriteKind.Node && x.nodeMenuName == menu.name);
+		}
+
+		/// <summary>Add/remove a node favorite within the category under the given parent.</summary>
+		void SetNodeFavorite(NodeMenu menu, string parentID, bool visible) {
+			if(menu == null)
+				return;
+			var existing = FavoritesManager.asset.entries.Where(x =>
+				x.categoryID == currentCategoryID && x.kind == FavoriteKind.Node &&
+				x.nodeMenuName == menu.name).ToList();
+			if(visible) {
+				if(existing.Count > 0)
+					return; // already favorited
+				FavoritesManager.AddEntry(currentCategoryID, new FavoritesDataAsset.Entry {
+					kind = FavoriteKind.Node,
+					nodeMenuName = menu.name,
+					parentID = parentID ?? string.Empty,
+				});
+			}
+			else {
+				foreach(var ex in existing)
+					FavoritesManager.RemoveEntry(ex.id);
+			}
+		}
+
+		void OpenAddNodePopup() {
+			var parentID = ResolveIntentParent(x => x.kind == FavoriteKind.Folder || x.kind == FavoriteKind.Namespace);
+			ActionPopupWindow.Show(() => BuildAddNodeUI(parentID))
+				.ChangePosition(this.GetMousePositionForMenu(Event.current.mousePosition));
+		}
+
+		/// <summary>Row for the add-node TreeView popup.</summary>
+		class NodeToggleRow : VisualElement {
+			public Toggle toggle;
+			public Image icon;
+			public Label label;
+			public Label categoryLabel;
+			public Action<bool> onToggle;
+		}
+
+		/// <summary>
+		/// Builds the 'Add Nodes' popup content using a virtualized TreeView with a
+		/// search field — the node registry is large, so rows must be recycled.
+		/// </summary>
+		VisualElement BuildAddNodeUI(string parentID) {
+			var root = new VisualElement();
+			root.style.paddingTop = 8;
+			root.style.paddingBottom = 8;
+			root.style.paddingLeft = 10;
+			root.style.paddingRight = 10;
+			root.style.minWidth = 440;
+			root.focusable = true;
+			root.RegisterCallback<KeyDownEvent>(evt => {
+				if(evt.keyCode == KeyCode.Escape) {
+					ActionPopupWindow.CloseLast();
+					evt.StopPropagation();
+				}
+			});
+
+			root.Add(new Label("Add Nodes") {
+				style = { unityFontStyleAndWeight = FontStyle.Bold, marginBottom = 6 }
+			});
+
+			var allNodes = nodeMenuCache.Values
+				.OrderBy(m => m.category, StringComparer.OrdinalIgnoreCase)
+				.ThenBy(m => m.name, StringComparer.OrdinalIgnoreCase)
+				.ToList();
+
+			TreeView typeTree = null;
+			string filterText = "";
+			var items = new List<TreeViewItemData<NodeMenu>>();
+			var usedIDs = new HashSet<int>();
+
+			bool MatchesFilter(NodeMenu m) {
+				if(string.IsNullOrEmpty(filterText))
+					return true;
+				return (m.name != null && m.name.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0) ||
+					(m.category != null && m.category.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0);
+			}
+
+			void ApplyFilter() {
+				items.Clear();
+				usedIDs.Clear();
+				foreach(var m in allNodes) {
+					if(!MatchesFilter(m))
+						continue;
+					int id = m.name.GetHashCode();
+					while(!usedIDs.Add(id))
+						id++;
+					items.Add(new TreeViewItemData<NodeMenu>(id, m));
+				}
+				typeTree?.SetRootItems(items);
+				typeTree?.Rebuild();
+			}
+
+			void RefreshRows() {
+				typeTree?.RefreshItems();
+			}
+
+			void SetAllVisible(bool visible) {
+				foreach(var item in items)
+					SetNodeFavorite(item.data, parentID, visible);
+			}
+
+			// ── Search ──
+			var searchField = new ToolbarSearchField() { style = { flexGrow = 1, marginBottom = 6 } };
+			searchField.RegisterValueChangedCallback(evt => {
+				filterText = evt.newValue ?? string.Empty;
+				ApplyFilter();
+			});
+			root.Add(searchField);
+
+			// ── Toolbar: Select All / Deselect All / spacer / Close ──
+			var toolbarRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 6 } };
+			Button CreateToolbarButton(string text, Action onClick) => new Button(onClick) { text = text };
+			toolbarRow.Add(CreateToolbarButton("Select All", () => { SetAllVisible(true); RefreshRows(); }));
+			toolbarRow.Add(CreateToolbarButton("Deselect All", () => { SetAllVisible(false); RefreshRows(); }));
+			var toolbarSpacer = new VisualElement { style = { flexGrow = 1 } };
+			toolbarRow.Add(toolbarSpacer);
+			toolbarRow.Add(CreateToolbarButton("Close", () => ActionPopupWindow.CloseLast()));
+			root.Add(toolbarRow);
+
+			// ── Virtualized node list ──
+			typeTree = new TreeView(
+				makeItem: () => {
+					var row = new NodeToggleRow {
+						style = { flexDirection = FlexDirection.Row, alignItems = Align.Center }
+					};
+					row.toggle = new Toggle();
+					row.toggle.style.marginRight = 4;
+					row.toggle.RegisterValueChangedCallback(evt => row.onToggle?.Invoke(evt.newValue));
+					row.Add(row.toggle);
+					row.icon = new Image();
+					row.icon.style.width = 16;
+					row.icon.style.height = 16;
+					row.icon.style.flexShrink = 0;
+					row.icon.style.marginRight = 4;
+					row.Add(row.icon);
+					row.label = new Label();
+					row.label.style.flexGrow = 1;
+					row.Add(row.label);
+					row.categoryLabel = new Label() {
+						style = {
+							color = new Color(.55f, .55f, .55f), fontSize = 9,
+							unityTextAlign = TextAnchor.MiddleRight
+						}
+					};
+					row.Add(row.categoryLabel);
+					return row;
+				},
+				bindItem: (ve, index) => {
+					if(!(ve is NodeToggleRow row))
+						return;
+					if(index < 0 || index >= items.Count)
+						return;
+					var menu = items[index].data;
+					row.toggle.SetValueWithoutNotify(IsNodeFavorited(menu));
+					row.onToggle = v => SetNodeFavorite(menu, parentID, v);
+					Texture iconTex = null;
+					try {
+						var iconType = menu.GetIcon();
+						iconTex = iconType != null ? uNodeEditorUtility.GetTypeIcon(iconType) : null;
+					}
+					catch { }
+					row.icon.image = iconTex;
+					row.label.text = menu.name;
+					row.categoryLabel.text = menu.category;
+				}
+			);
+			typeTree.style.height = 360;
+			typeTree.style.flexGrow = 1;
+			typeTree.virtualizationMethod = CollectionVirtualizationMethod.FixedHeight;
+			typeTree.fixedItemHeight = 20;
+			typeTree.selectionType = SelectionType.None;
+			typeTree.showAlternatingRowBackgrounds = AlternatingRowBackground.All;
+			ApplyFilter();
+			root.Add(typeTree);
+			return root;
+		}
+
 		/// <summary>Recycled row for the namespace types TreeView popup.</summary>
 		class TypeToggleRow : VisualElement {
 			public Toggle toggle;
@@ -2262,9 +2447,27 @@ namespace MaxyGames.UNode.Editors {
 						return mi;
 					return null;
 				}
+				case FavoriteKind.Node:
+					// UGraphView natively handles a NodeMenu payload.
+					return ResolveNodeMenu(e);
 				default:
 					return null;
 			}
+		}
+
+		/// <summary>
+		/// Resolves the NodeMenu of a node favorite: by its stored menu name,
+		/// falling back to a type match within the cached menus.
+		/// </summary>
+		NodeMenu ResolveNodeMenu(FavoritesDataAsset.Entry e) {
+			NodeMenu menu = null;
+			if(!string.IsNullOrEmpty(e.nodeMenuName) && nodeMenuCache != null)
+				nodeMenuCache.TryGetValue(e.nodeMenuName, out menu);
+			if(menu == null && nodeMenuCache != null) {
+				try { menu = nodeMenuCache.Values.FirstOrDefault(m => m.type == ResolveEntryType(e)); }
+				catch { }
+			}
+			return menu;
 		}
 
 		Type ResolveEntryType(FavoritesDataAsset.Entry e) {
@@ -2280,11 +2483,7 @@ namespace MaxyGames.UNode.Editors {
 			var e = de.entry;
 			var pos = graphEditor.mousePositionInScreen;
 			if(e.kind == FavoriteKind.Node) {
-				NodeMenu menu = null;
-				if(!string.IsNullOrEmpty(e.nodeMenuName) && nodeMenuCache != null)
-					nodeMenuCache.TryGetValue(e.nodeMenuName, out menu);
-				if(menu == null && nodeMenuCache != null)
-					menu = nodeMenuCache.Values.FirstOrDefault(m => m.type == ResolveEntryType(e));
+				var menu = ResolveNodeMenu(e);
 				if(menu != null) { NodeEditorUtility.AddNewNode<Node>(graphEditor.graphData, menu.nodeName, menu.type, pos); graphEditor.Refresh(); }
 			} else if(e.kind == FavoriteKind.Type) {
 				var type = ResolveEntryType(e);
