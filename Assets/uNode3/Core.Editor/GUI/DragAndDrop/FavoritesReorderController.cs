@@ -21,24 +21,24 @@ namespace MaxyGames.UNode.Editors.UI {
 ///   through FavoritesManager, then let the window rebuild the tree.
 /// </summary>
 internal class FavoritesReorderController : TreeViewCustomDragAndDropController {
-	readonly Action<string, int, bool> onDrop;
+	readonly Action<FavoritesDataAsset.FavoriteEntry, int, bool> onDrop;
 
-	public FavoritesReorderController(BaseTreeView view, Action<string, int, bool> onDrop) : base(view, null) {
+	public FavoritesReorderController(BaseTreeView view, Action<FavoritesDataAsset.FavoriteEntry, int, bool> onDrop) : base(view, null) {
 		this.onDrop = onDrop;
 	}
 
 	public override void OnDrop(IListDragAndDropArgs args) {
-		// Read the dragged entry id from the drag payload.
-		string movedID = null;
+		// Read the dragged entry from the drag payload.
+		FavoritesDataAsset.FavoriteEntry movedEntry = null;
 		try {
 			var data = DragAndDropUtility.dragAndDrop.data;
-			movedID = data?.GetGenericData("favoriteID") as string;
+			movedEntry = data?.GetGenericData("favoriteEntry") as FavoritesDataAsset.FavoriteEntry;
 		} catch { }
-		if(string.IsNullOrEmpty(movedID))
+		if(movedEntry == null)
 			return;
 
 		bool overItem = args.dragAndDropPosition == DragAndDropPosition.OverItem;
-		onDrop?.Invoke(movedID, args.insertAtIndex, overItem);
+		onDrop?.Invoke(movedEntry, args.insertAtIndex, overItem);
 	}
 }
 }
