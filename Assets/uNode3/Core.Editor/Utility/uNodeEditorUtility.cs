@@ -39,10 +39,10 @@ namespace MaxyGames.UNode.Editors {
 		internal static class ProBinding {
 			public static Action CallbackShowCSharpPreview;
 			public static Action CallbackShowGlobalSearch;
-			public static Action CallbackShowNodeBrowser; 
+			public static Action CallbackShowNodeBrowser;
 			public static Action CallbackShowBookmarks;
 			public static Action CallbackShowGraphHierarchy;
-			public static Action<MemberInfo> CallbackFindInNodeBrowser;
+			public static Action<MemberInfo> CallbackRevealInNodeBrowser;
 		}
 
 		[MenuItem("Tools/uNode/Live C# Preview")]
@@ -53,9 +53,8 @@ namespace MaxyGames.UNode.Editors {
 			ProBinding.CallbackShowCSharpPreview?.Invoke();
 		}
 
-		[MenuItem("Tools/uNode/Node Browser", false, 100)]
 		public static void ShowNodeBrowser() {
-			if(uNodeEditorUtility.DisplayRequiredProVersion("Node Browser")) {
+			if(uNodeEditorUtility.DisplayRequiredProVersion("Favorites")) {
 				return;
 			}
 			ProBinding.CallbackShowNodeBrowser?.Invoke();
@@ -86,10 +85,10 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		public static void FindInBrowser(MemberInfo info) {
-			if(uNodeEditorUtility.DisplayRequiredProVersion("Node Browser")) {
+			if(DisplayRequiredProVersion("Node Browser")) {
 				return;
 			}
-			ProBinding.CallbackFindInNodeBrowser?.Invoke(info);
+			ProBinding.CallbackRevealInNodeBrowser?.Invoke(info);
 		}
 		#endregion
 

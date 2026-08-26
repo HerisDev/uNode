@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -42,3 +42,4 @@ internal class FavoritesReorderController : TreeViewCustomDragAndDropController 
 	}
 }
 }
+

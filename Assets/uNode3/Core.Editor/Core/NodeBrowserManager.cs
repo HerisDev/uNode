@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -154,7 +154,7 @@ namespace MaxyGames.UNode.Editors {
 	/// Static facade over the FavoritesDataAsset singleton providing tree CRUD,
 	/// persistence and change notifications.
 	/// </summary>
-	public static class FavoritesManager {
+	public static class NodeBrowserManager {
 		/// <summary>Raised whenever the favorites data changed.</summary>
 		public static event Action onChanged;
 
@@ -228,9 +228,45 @@ namespace MaxyGames.UNode.Editors {
 		#endregion
 
 		#region Categories
+		/// <summary>Id of the built-in, never-saved Browser category.</summary>
+		public const string BrowserCategoryID = "[browser]";
+
+		static FavoritesDataAsset.FavoriteCategory s_BrowserCategory;
+
+		/// <summary>True when the category is the built-in (non-saved) browser.</summary>
+		public static bool IsBrowserCategory(FavoritesDataAsset.FavoriteCategory category) {
+			return category != null && category.id == BrowserCategoryID;
+		}
+
+		/// <summary>
+		/// Built-in read-only category whose roots are the namespaces from the
+		/// preference browser list. Never persisted; rebuilt per session and
+		/// whenever the reflection cache is cleared.
+		/// </summary>
+		public static FavoritesDataAsset.FavoriteCategory GetBrowserCategory() {
+			if(s_BrowserCategory != null)
+				return s_BrowserCategory;
+			var cat = new FavoritesDataAsset.FavoriteCategory {
+				id = BrowserCategoryID,
+				name = "Browser",
+			};
+			foreach(var ns in uNodePreference.GetBrowserNamespaceList()) {
+				cat.roots.Add(new FavoritesDataAsset.FavoriteEntry {
+					id = "[bns]:" + ns,
+					kind = FavoriteKind.Namespace,
+					isVirtual = true,
+					displayName = ns,
+				});
+			}
+			s_BrowserCategory = cat;
+			return cat;
+		}
+
 		public static List<FavoritesDataAsset.FavoriteCategory> GetCategories() {
 			EnsureInitialized();
-			return asset.categories;
+			var list = new List<FavoritesDataAsset.FavoriteCategory>(asset.categories);
+			list.Add(GetBrowserCategory()); // built-in, never persisted
+			return list;
 		}
 
 		public static FavoritesDataAsset.FavoriteCategory GetDefaultCategory() {
@@ -603,12 +639,14 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		/// <summary>Drops all cached reflection results (e.g. on domain reload).</summary>
+		/// <summary>Drops all cached reflection results and the browser category
+		/// (e.g. on domain reload) so both rebuild fresh.</summary>
 		public static void ClearReflectionCache() {
 			lock(s_CacheLock) {
 				s_NsTypesCache.Clear();
 				s_MembersCache.Clear();
 			}
+			s_BrowserCategory = null;
 		}
 		#endregion
 
@@ -685,3 +723,4 @@ namespace MaxyGames.UNode.Editors {
 		#endregion
 	}
 }
+
