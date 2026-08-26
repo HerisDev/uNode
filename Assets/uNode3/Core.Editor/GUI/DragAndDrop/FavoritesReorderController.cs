@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -15,9 +15,9 @@ namespace MaxyGames.UNode.Editors.UI {
 /// (which would mutate Unity's internal tree into a state that doesn't
 /// match our data source), it reads the dragged entry id from the drag
 /// payload and forwards the drop position to the window:
-/// - OverItem  → nest the moved entry INSIDE the targeted row (folder),
+/// - OverItem   nest the moved entry INSIDE the targeted row (folder),
 ///   matching GraphPanel's TreeViewUGraphElementDragAndDropController.
-/// - otherwise → resolve the slot via the callback and persist the move
+/// - otherwise  resolve the slot via the callback and persist the move
 ///   through NodeBrowserManager, then let the window rebuild the tree.
 /// </summary>
 internal class FavoritesReorderController : TreeViewCustomDragAndDropController {

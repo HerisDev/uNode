@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -20,7 +20,7 @@ namespace MaxyGames.UNode.Editors {
 	/// <summary>
 	/// How a type item's generated member list behaves.
 	/// The stored name list flips meaning with the mode:
-	/// IncludeAll → names are hidden members; ExcludeAll → names are visible members.
+	/// IncludeAll  names are hidden members; ExcludeAll  names are visible members.
 	/// </summary>
 	public enum TypeMemberMode {
 		/// <summary>All generated members are shown unless excluded by name.</summary>
@@ -34,7 +34,7 @@ namespace MaxyGames.UNode.Editors {
 	/// Persisted automatically by Unity inside Library/ScriptableSingletons
 	/// (outside the Assets folder) using Unity's native serializer so that
 	/// SerializedType references round-trip correctly. Members are not
-	/// persisted — they are generated from their type items via reflection.
+	/// persisted  they are generated from their type items via reflection.
 	/// The hierarchy is stored nested: each category holds its root entries,
 	/// and folders/namespaces embed their children.
 	/// </summary>
@@ -81,7 +81,7 @@ namespace MaxyGames.UNode.Editors {
 
 			/// <summary>
 			/// Runtime-only reflected member for virtual Member entries.
-			/// Never serialized — open generics stay intact.
+			/// Never serialized  open generics stay intact.
 			/// </summary>
 			[System.NonSerialized]
 			public MemberInfo rawMember;
@@ -161,7 +161,8 @@ namespace MaxyGames.UNode.Editors {
 			if(s_Initialized)
 				return;
 			s_Initialized = true;
-			EnsureSeeded();
+			foreach(var cat in asset.categories)
+				RefreshParents(cat);
 		}
 
 		static void RaiseChanged() {
@@ -177,50 +178,6 @@ namespace MaxyGames.UNode.Editors {
 			EnsureInitialized();
 			asset.Save();
 		}
-
-		#region First Run
-		/// <summary>Creates the default category pre-populated with useful namespaces.</summary>
-		static void EnsureSeeded() {
-			if(asset.categories.Count > 0) {
-				foreach(var cat in asset.categories)
-					RefreshParents(cat);
-				return;
-			}
-			var general = new NodeBrowserDataAsset.BrowserCategory {
-				id = Guid.NewGuid().ToString(),
-				name = "General",
-			};
-			asset.categories.Add(general);
-			SeedDefaultNamespaces(general);
-			Save();
-		}
-
-		/// <summary>
-		/// Pre-populates a freshly created category with commonly used namespaces,
-		/// mirroring uNode's default favorite namespaces plus a few essentials.
-		/// </summary>
-		static void SeedDefaultNamespaces(NodeBrowserDataAsset.BrowserCategory category) {
-			string[] defaultNamespaces = {
-				"System",
-				"System.Collections",
-				"System.Collections.Generic",
-				"UnityEngine",
-				"UnityEngine.AI",
-				"UnityEngine.Events",
-				"UnityEngine.EventSystems",
-				"UnityEngine.SceneManagement",
-				"UnityEngine.UI",
-				"UnityEngine.UIElements",
-			};
-			foreach(var ns in defaultNamespaces) {
-				category.roots.Add(new NodeBrowserDataAsset.BrowserEntry {
-					id = Guid.NewGuid().ToString(),
-					kind = NodeBrowserEntryKind.Namespace,
-					displayName = ns,
-				});
-			}
-		}
-		#endregion
 
 		#region Categories
 		/// <summary>Id of the built-in, never-saved Browser category.</summary>
@@ -266,7 +223,7 @@ namespace MaxyGames.UNode.Editors {
 
 		public static NodeBrowserDataAsset.BrowserCategory GetDefaultCategory() {
 			EnsureInitialized();
-			return asset.categories.FirstOrDefault() ?? GetOrCreateCategory("General");
+			return GetBrowserCategory();
 		}
 
 		public static NodeBrowserDataAsset.BrowserCategory GetOrCreateCategory(string name) {
@@ -418,13 +375,13 @@ namespace MaxyGames.UNode.Editors {
 				return false;
 			if(ReferenceEquals(entry.parentEntry, newParent) &&
 				(entry.parentEntry != null || category.roots.Contains(entry))) {
-				// Same container — pure reorder below handles it; still validate bounds.
+				// Same container  pure reorder below handles it; still validate bounds.
 			}
 			if(index < -1)
 				index = -1;
 			var sourceList = entry.parentEntry != null ? entry.parentEntry.children : category.roots;
 			if(!sourceList.Contains(entry)) {
-				// Stale runtime links — refresh and retry once.
+				// Stale runtime links  refresh and retry once.
 				RefreshParents(category);
 				sourceList = entry.parentEntry != null ? entry.parentEntry.children : category.roots;
 				if(!sourceList.Contains(entry))
@@ -510,7 +467,7 @@ namespace MaxyGames.UNode.Editors {
 		#region Visibility Rules
 		/// <summary>
 		/// Mode-aware visibility of a reflected member under a type favorite.
-		/// IncludeAll → visible unless listed; ExcludeAll → visible only when
+		/// IncludeAll  visible unless listed; ExcludeAll  visible only when
 		/// listed. A null owner is always visible.
 		/// </summary>
 		public static bool IsMemberVisibleIn(NodeBrowserDataAsset.BrowserEntry typeEntry, MemberInfo member) {
@@ -541,9 +498,9 @@ namespace MaxyGames.UNode.Editors {
 
 		#region Reflection Cache
 		static readonly object s_CacheLock = new object();
-		// Namespace string → reflected types (unfiltered).
+		// Namespace string  reflected types (unfiltered).
 		static readonly Dictionary<string, Type[]> s_NsTypesCache = new Dictionary<string, Type[]>();
-		// Type → reflected members (unfiltered).
+		// Type  reflected members (unfiltered).
 		static readonly Dictionary<Type, MemberInfo[]> s_MembersCache = new Dictionary<Type, MemberInfo[]>();
 
 		/// <summary>
