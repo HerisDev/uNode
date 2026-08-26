@@ -7,18 +7,13 @@ using UnityEditor;
 
 namespace MaxyGames.UNode.Editors {
 	/// <summary>
-	/// The kind of favorited item.
+	/// The kind of node browser item.
 	/// </summary>
-	public enum FavoriteKind {
-		/// <summary>Favorited node (a node type registered in the node menu).</summary>
+	public enum NodeBrowserEntryKind {
 		Node = 0,
-		/// <summary>Favorited type (native or uNode runtime type).</summary>
 		Type = 1,
-		/// <summary>Favorited member (field, property, method, constructor or event).</summary>
 		Member = 2,
-		/// <summary>A folder container. Can be nested and hold any item kind (including other folders).</summary>
 		Folder = 3,
-		/// <summary>A namespace. When expanded, it shows read-only virtual type rows derived from reflection.</summary>
 		Namespace = 4,
 	}
 
@@ -35,7 +30,7 @@ namespace MaxyGames.UNode.Editors {
 	}
 
 	/// <summary>
-	/// ScriptableSingleton container for all favorites data.
+	/// ScriptableSingleton container for all node browser data.
 	/// Persisted automatically by Unity inside Library/ScriptableSingletons
 	/// (outside the Assets folder) using Unity's native serializer so that
 	/// SerializedType references round-trip correctly. Members are not
@@ -43,20 +38,20 @@ namespace MaxyGames.UNode.Editors {
 	/// The hierarchy is stored nested: each category holds its root entries,
 	/// and folders/namespaces embed their children.
 	/// </summary>
-	[FilePath(uNodePreference.preferenceDirectory + "/Favorites.asset", FilePathAttribute.Location.ProjectFolder)]
-	public class FavoritesDataAsset : ScriptableSingleton<FavoritesDataAsset> {
+	[FilePath(uNodePreference.preferenceDirectory + "/NodeBrowser.asset", FilePathAttribute.Location.ProjectFolder)]
+	public class NodeBrowserDataAsset : ScriptableSingleton<NodeBrowserDataAsset> {
 		[Serializable]
-		public class FavoriteCategory {
+		public class BrowserCategory {
 			public string id;
 			public string name;
 			[SerializeReference]
-			public List<FavoriteEntry> roots = new List<FavoriteEntry>();
+			public List<BrowserEntry> roots = new List<BrowserEntry>();
 		}
 
 		[Serializable]
-		public class FavoriteEntry {
+		public class BrowserEntry {
 			public string id;
-			public FavoriteKind kind;
+			public NodeBrowserEntryKind kind;
 			public string displayName;
 
 			/// <summary>The targeted type. Used for Type kind.</summary>
@@ -82,7 +77,7 @@ namespace MaxyGames.UNode.Editors {
 
 			/// <summary>Embedded children. Only meaningful for Folder/Namespace entries.</summary>
 			[SerializeReference]
-			public List<FavoriteEntry> children = new List<FavoriteEntry>();
+			public List<BrowserEntry> children = new List<BrowserEntry>();
 
 			/// <summary>
 			/// Runtime-only reflected member for virtual Member entries.
@@ -93,11 +88,11 @@ namespace MaxyGames.UNode.Editors {
 
 			/// <summary>Runtime back-reference to the containing entry/category root.</summary>
 			[System.NonSerialized]
-			public FavoriteEntry parentEntry;
+			public BrowserEntry parentEntry;
 
 			/// <summary>Runtime back-reference for virtual rows: the favorited owner.</summary>
 			[System.NonSerialized]
-			public FavoriteEntry ownerEntry;
+			public BrowserEntry ownerEntry;
 
 			/// <summary>
 			/// The resolved System.Type of this entry (declaring type for members).
@@ -125,7 +120,7 @@ namespace MaxyGames.UNode.Editors {
 			/// <summary>The reflected member name for Member kind entries.</summary>
 			public string memberName {
 				get {
-					if(kind != FavoriteKind.Member)
+					if(kind != NodeBrowserEntryKind.Member)
 						return null;
 					return rawMember?.Name;
 				}
@@ -133,13 +128,13 @@ namespace MaxyGames.UNode.Editors {
 
 			/// <summary>True when this entry can contain serialized child entries.</summary>
 			public bool CanHaveChilds =>
-				kind == FavoriteKind.Folder || kind == FavoriteKind.Namespace;
+				kind == NodeBrowserEntryKind.Folder || kind == NodeBrowserEntryKind.Namespace;
 
 			/// <summary>True when this entry may receive drops from other items.</summary>
-			public bool CanBeDropTarget => kind == FavoriteKind.Folder;
+			public bool CanBeDropTarget => kind == NodeBrowserEntryKind.Folder;
 		}
 
-		public List<FavoriteCategory> categories = new List<FavoriteCategory>();
+		public List<BrowserCategory> categories = new List<BrowserCategory>();
 
 		/// <summary>Entry ids whose tree row is currently expanded (persisted).</summary>
 		public List<string> expandedEntries = new List<string>();
@@ -158,7 +153,7 @@ namespace MaxyGames.UNode.Editors {
 		/// <summary>Raised whenever the favorites data changed.</summary>
 		public static event Action onChanged;
 
-		public static FavoritesDataAsset asset => FavoritesDataAsset.instance;
+		public static NodeBrowserDataAsset asset => NodeBrowserDataAsset.instance;
 
 		static bool s_Initialized;
 
@@ -191,7 +186,7 @@ namespace MaxyGames.UNode.Editors {
 					RefreshParents(cat);
 				return;
 			}
-			var general = new FavoritesDataAsset.FavoriteCategory {
+			var general = new NodeBrowserDataAsset.BrowserCategory {
 				id = Guid.NewGuid().ToString(),
 				name = "General",
 			};
@@ -204,7 +199,7 @@ namespace MaxyGames.UNode.Editors {
 		/// Pre-populates a freshly created category with commonly used namespaces,
 		/// mirroring uNode's default favorite namespaces plus a few essentials.
 		/// </summary>
-		static void SeedDefaultNamespaces(FavoritesDataAsset.FavoriteCategory category) {
+		static void SeedDefaultNamespaces(NodeBrowserDataAsset.BrowserCategory category) {
 			string[] defaultNamespaces = {
 				"System",
 				"System.Collections",
@@ -218,9 +213,9 @@ namespace MaxyGames.UNode.Editors {
 				"UnityEngine.UIElements",
 			};
 			foreach(var ns in defaultNamespaces) {
-				category.roots.Add(new FavoritesDataAsset.FavoriteEntry {
+				category.roots.Add(new NodeBrowserDataAsset.BrowserEntry {
 					id = Guid.NewGuid().ToString(),
-					kind = FavoriteKind.Namespace,
+					kind = NodeBrowserEntryKind.Namespace,
 					displayName = ns,
 				});
 			}
@@ -231,10 +226,10 @@ namespace MaxyGames.UNode.Editors {
 		/// <summary>Id of the built-in, never-saved Browser category.</summary>
 		public const string BrowserCategoryID = "[browser]";
 
-		static FavoritesDataAsset.FavoriteCategory s_BrowserCategory;
+		static NodeBrowserDataAsset.BrowserCategory s_BrowserCategory;
 
 		/// <summary>True when the category is the built-in (non-saved) browser.</summary>
-		public static bool IsBrowserCategory(FavoritesDataAsset.FavoriteCategory category) {
+		public static bool IsBrowserCategory(NodeBrowserDataAsset.BrowserCategory category) {
 			return category != null && category.id == BrowserCategoryID;
 		}
 
@@ -243,17 +238,17 @@ namespace MaxyGames.UNode.Editors {
 		/// preference browser list. Never persisted; rebuilt per session and
 		/// whenever the reflection cache is cleared.
 		/// </summary>
-		public static FavoritesDataAsset.FavoriteCategory GetBrowserCategory() {
+		public static NodeBrowserDataAsset.BrowserCategory GetBrowserCategory() {
 			if(s_BrowserCategory != null)
 				return s_BrowserCategory;
-			var cat = new FavoritesDataAsset.FavoriteCategory {
+			var cat = new NodeBrowserDataAsset.BrowserCategory {
 				id = BrowserCategoryID,
 				name = "Browser",
 			};
 			foreach(var ns in uNodePreference.GetBrowserNamespaceList()) {
-				cat.roots.Add(new FavoritesDataAsset.FavoriteEntry {
+				cat.roots.Add(new NodeBrowserDataAsset.BrowserEntry {
 					id = "[bns]:" + ns,
-					kind = FavoriteKind.Namespace,
+					kind = NodeBrowserEntryKind.Namespace,
 					isVirtual = true,
 					displayName = ns,
 				});
@@ -262,23 +257,23 @@ namespace MaxyGames.UNode.Editors {
 			return cat;
 		}
 
-		public static List<FavoritesDataAsset.FavoriteCategory> GetCategories() {
+		public static List<NodeBrowserDataAsset.BrowserCategory> GetCategories() {
 			EnsureInitialized();
-			var list = new List<FavoritesDataAsset.FavoriteCategory>(asset.categories);
+			var list = new List<NodeBrowserDataAsset.BrowserCategory>(asset.categories);
 			list.Add(GetBrowserCategory()); // built-in, never persisted
 			return list;
 		}
 
-		public static FavoritesDataAsset.FavoriteCategory GetDefaultCategory() {
+		public static NodeBrowserDataAsset.BrowserCategory GetDefaultCategory() {
 			EnsureInitialized();
 			return asset.categories.FirstOrDefault() ?? GetOrCreateCategory("General");
 		}
 
-		public static FavoritesDataAsset.FavoriteCategory GetOrCreateCategory(string name) {
+		public static NodeBrowserDataAsset.BrowserCategory GetOrCreateCategory(string name) {
 			EnsureInitialized();
 			var cat = asset.categories.FirstOrDefault(c => c.name == name);
 			if(cat == null) {
-				cat = new FavoritesDataAsset.FavoriteCategory {
+				cat = new NodeBrowserDataAsset.BrowserCategory {
 					id = Guid.NewGuid().ToString(),
 					name = name,
 				};
@@ -289,7 +284,7 @@ namespace MaxyGames.UNode.Editors {
 			return cat;
 		}
 
-		public static void RemoveCategory(FavoritesDataAsset.FavoriteCategory category) {
+		public static void RemoveCategory(NodeBrowserDataAsset.BrowserCategory category) {
 			if(category == null) return;
 			foreach(var id in Flatten(category).Select(e => e.id))
 				SetExpandedInternal(id, false);
@@ -301,7 +296,7 @@ namespace MaxyGames.UNode.Editors {
 
 		#region Tree Access
 		/// <summary>Depth-first iteration over every persisted entry of a category.</summary>
-		public static IEnumerable<FavoritesDataAsset.FavoriteEntry> Flatten(FavoritesDataAsset.FavoriteCategory category) {
+		public static IEnumerable<NodeBrowserDataAsset.BrowserEntry> Flatten(NodeBrowserDataAsset.BrowserCategory category) {
 			if(category == null)
 				yield break;
 			foreach(var root in category.roots) {
@@ -310,7 +305,7 @@ namespace MaxyGames.UNode.Editors {
 			}
 		}
 
-		static IEnumerable<FavoritesDataAsset.FavoriteEntry> Flatten(FavoritesDataAsset.FavoriteEntry entry) {
+		static IEnumerable<NodeBrowserDataAsset.BrowserEntry> Flatten(NodeBrowserDataAsset.BrowserEntry entry) {
 			if(entry == null)
 				yield break;
 			yield return entry;
@@ -323,7 +318,7 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>Depth-first iteration over all persisted entries of all categories.</summary>
-		public static IEnumerable<FavoritesDataAsset.FavoriteEntry> FlattenAll() {
+		public static IEnumerable<NodeBrowserDataAsset.BrowserEntry> FlattenAll() {
 			EnsureInitialized();
 			foreach(var cat in asset.categories) {
 				foreach(var e in Flatten(cat))
@@ -332,13 +327,13 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>(Re)assigns runtime parent references for a whole category.</summary>
-		public static void RefreshParents(FavoritesDataAsset.FavoriteCategory category) {
+		public static void RefreshParents(NodeBrowserDataAsset.BrowserCategory category) {
 			if(category == null) return;
 			foreach(var root in category.roots)
 				RefreshParents(root, null);
 		}
 
-		static void RefreshParents(FavoritesDataAsset.FavoriteEntry entry, FavoritesDataAsset.FavoriteEntry parent) {
+		static void RefreshParents(NodeBrowserDataAsset.BrowserEntry entry, NodeBrowserDataAsset.BrowserEntry parent) {
 			if(entry == null) return;
 			entry.parentEntry = parent;
 			if(entry.CanHaveChilds) {
@@ -348,7 +343,7 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>True when ancestor is entry itself or any of its parents.</summary>
-		public static bool IsDescendantOf(FavoritesDataAsset.FavoriteEntry entry, FavoritesDataAsset.FavoriteEntry ancestor) {
+		public static bool IsDescendantOf(NodeBrowserDataAsset.BrowserEntry entry, NodeBrowserDataAsset.BrowserEntry ancestor) {
 			var cur = entry;
 			while(cur != null) {
 				if(ReferenceEquals(cur, ancestor))
@@ -364,10 +359,10 @@ namespace MaxyGames.UNode.Editors {
 		/// Insert an entry under parent (null = category root). Assigns an id,
 		/// sets the runtime parent link, persists, and notifies.
 		/// </summary>
-		public static FavoritesDataAsset.FavoriteEntry AddEntry(
-			FavoritesDataAsset.FavoriteCategory category,
-			FavoritesDataAsset.FavoriteEntry parent,
-			FavoritesDataAsset.FavoriteEntry entry) {
+		public static NodeBrowserDataAsset.BrowserEntry AddEntry(
+			NodeBrowserDataAsset.BrowserCategory category,
+			NodeBrowserDataAsset.BrowserEntry parent,
+			NodeBrowserDataAsset.BrowserEntry entry) {
 			EnsureInitialized();
 			if(category == null || entry == null)
 				return entry;
@@ -385,7 +380,7 @@ namespace MaxyGames.UNode.Editors {
 		/// Remove an entry from its container. Children are removed with it
 		/// automatically since they live inside the entry.
 		/// </summary>
-		public static void Remove(FavoritesDataAsset.FavoriteEntry entry) {
+		public static void Remove(NodeBrowserDataAsset.BrowserEntry entry) {
 			EnsureInitialized();
 			if(entry == null) return;
 			if(!Detach(entry)) return;
@@ -395,7 +390,7 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>Detaches an entry from its container; returns false when not found.</summary>
-		static bool Detach(FavoritesDataAsset.FavoriteEntry entry) {
+		static bool Detach(NodeBrowserDataAsset.BrowserEntry entry) {
 			if(entry.parentEntry != null)
 				return entry.parentEntry.children.Remove(entry);
 			foreach(var cat in asset.categories) {
@@ -412,8 +407,8 @@ namespace MaxyGames.UNode.Editors {
 		/// sibling index (-1 = append). Validates: folder-only parent, same
 		/// category implied by object graph, no self/descendant moves.
 		/// </summary>
-		public static bool Move(FavoritesDataAsset.FavoriteEntry entry,
-			FavoritesDataAsset.FavoriteEntry newParent, int index, FavoritesDataAsset.FavoriteCategory category) {
+		public static bool Move(NodeBrowserDataAsset.BrowserEntry entry,
+			NodeBrowserDataAsset.BrowserEntry newParent, int index, NodeBrowserDataAsset.BrowserCategory category) {
 			EnsureInitialized();
 			if(entry == null || category == null)
 				return false;
@@ -451,7 +446,7 @@ namespace MaxyGames.UNode.Editors {
 			return true;
 		}
 
-		static void DetachSilent(FavoritesDataAsset.FavoriteEntry entry) {
+		static void DetachSilent(NodeBrowserDataAsset.BrowserEntry entry) {
 			if(entry.parentEntry != null)
 				entry.parentEntry.children.Remove(entry);
 			else {
@@ -461,8 +456,8 @@ namespace MaxyGames.UNode.Editors {
 		}
 
 		/// <summary>Sort a container's direct children with the given comparison.</summary>
-		public static void SortChildren(FavoritesDataAsset.FavoriteEntry parent,
-			FavoritesDataAsset.FavoriteCategory category, Comparison<FavoritesDataAsset.FavoriteEntry> comparison) {
+		public static void SortChildren(NodeBrowserDataAsset.BrowserEntry parent,
+			NodeBrowserDataAsset.BrowserCategory category, Comparison<NodeBrowserDataAsset.BrowserEntry> comparison) {
 			EnsureInitialized();
 			var list = parent != null ? parent.children : category.roots;
 			if(list == null || list.Count < 2)
@@ -472,7 +467,7 @@ namespace MaxyGames.UNode.Editors {
 			RaiseChanged();
 		}
 
-		public static void Rename(FavoritesDataAsset.FavoriteEntry entry, string newName) {
+		public static void Rename(NodeBrowserDataAsset.BrowserEntry entry, string newName) {
 			if(entry == null || string.IsNullOrWhiteSpace(newName)) return;
 			entry.displayName = newName.Trim();
 			Save();
@@ -518,7 +513,7 @@ namespace MaxyGames.UNode.Editors {
 		/// IncludeAll → visible unless listed; ExcludeAll → visible only when
 		/// listed. A null owner is always visible.
 		/// </summary>
-		public static bool IsMemberVisibleIn(FavoritesDataAsset.FavoriteEntry typeEntry, MemberInfo member) {
+		public static bool IsMemberVisibleIn(NodeBrowserDataAsset.BrowserEntry typeEntry, MemberInfo member) {
 			if(typeEntry == null || member == null)
 				return true;
 			bool inList = typeEntry.excludedMembers != null && typeEntry.excludedMembers.Contains(member.Name);
@@ -529,7 +524,7 @@ namespace MaxyGames.UNode.Editors {
 		/// Mode-aware visibility of a type name under a namespace favorite.
 		/// Mirrors IsMemberVisibleIn. A null owner is always visible.
 		/// </summary>
-		public static bool IsTypeNameVisibleIn(FavoritesDataAsset.FavoriteEntry nsEntry, string typeName) {
+		public static bool IsTypeNameVisibleIn(NodeBrowserDataAsset.BrowserEntry nsEntry, string typeName) {
 			if(nsEntry == null || string.IsNullOrEmpty(typeName))
 				return true;
 			bool inList = nsEntry.excludedMembers != null && nsEntry.excludedMembers.Contains(typeName);
@@ -605,12 +600,12 @@ namespace MaxyGames.UNode.Editors {
 		/// True when raw reflection results for this owner are already cached
 		/// (its generated children can be built instantly).
 		/// </summary>
-		public static bool HasRawCache(FavoritesDataAsset.FavoriteEntry owner) {
+		public static bool HasRawCache(NodeBrowserDataAsset.BrowserEntry owner) {
 			if(owner == null) return false;
 			lock(s_CacheLock) {
-				if(owner.kind == FavoriteKind.Namespace)
+				if(owner.kind == NodeBrowserEntryKind.Namespace)
 					return s_NsTypesCache.ContainsKey(owner.displayName);
-				if(owner.kind == FavoriteKind.Type) {
+				if(owner.kind == NodeBrowserEntryKind.Type) {
 					Type t = null;
 					try { t = owner.resolvedType; } catch { }
 					return t != null && s_MembersCache.ContainsKey(t);
@@ -623,13 +618,13 @@ namespace MaxyGames.UNode.Editors {
 		/// Populates the raw reflection caches for this owner
 		/// (namespace types or type members). Thread-safe.
 		/// </summary>
-		public static void WarmReflectionCache(FavoritesDataAsset.FavoriteEntry owner) {
+		public static void WarmReflectionCache(NodeBrowserDataAsset.BrowserEntry owner) {
 			if(owner == null) return;
 			switch(owner.kind) {
-				case FavoriteKind.Namespace:
+				case NodeBrowserEntryKind.Namespace:
 					GetNamespaceTypesRaw(owner.displayName);
 					break;
-				case FavoriteKind.Type: {
+				case NodeBrowserEntryKind.Type: {
 					Type t = null;
 					try { t = owner.resolvedType; } catch { }
 					if(t != null)
@@ -655,8 +650,8 @@ namespace MaxyGames.UNode.Editors {
 		/// Resolve the reflected MemberInfo of a member entry. Virtual entries
 		/// carry the raw MemberInfo directly (open generics stay intact).
 		/// </summary>
-		public static MemberInfo GetEntryMember(FavoritesDataAsset.FavoriteEntry entry) {
-			if(entry == null || entry.kind != FavoriteKind.Member)
+		public static MemberInfo GetEntryMember(NodeBrowserDataAsset.BrowserEntry entry) {
+			if(entry == null || entry.kind != NodeBrowserEntryKind.Member)
 				return null;
 			return entry.rawMember;
 		}
@@ -666,17 +661,17 @@ namespace MaxyGames.UNode.Editors {
 		/// When ignoreVisibility is false the namespace's memberMode + excludedMembers
 		/// list filter which types are returned. These are never persisted.
 		/// </summary>
-		public static List<FavoritesDataAsset.FavoriteEntry> GetVirtualNamespaceChildren(
-			FavoritesDataAsset.FavoriteEntry nsEntry, bool ignoreVisibility = false) {
-			var result = new List<FavoritesDataAsset.FavoriteEntry>();
+		public static List<NodeBrowserDataAsset.BrowserEntry> GetVirtualNamespaceChildren(
+			NodeBrowserDataAsset.BrowserEntry nsEntry, bool ignoreVisibility = false) {
+			var result = new List<NodeBrowserDataAsset.BrowserEntry>();
 			if(nsEntry == null || string.IsNullOrEmpty(nsEntry.displayName))
 				return result;
 			foreach(var t in GetNamespaceTypesRaw(nsEntry.displayName)) {
 				if(!ignoreVisibility && !IsTypeNameVisibleIn(nsEntry, t.Name))
 					continue;
-				result.Add(new FavoritesDataAsset.FavoriteEntry {
+				result.Add(new NodeBrowserDataAsset.BrowserEntry {
 					id = "[ns]:" + t.AssemblyQualifiedName,
-					kind = FavoriteKind.Type,
+					kind = NodeBrowserEntryKind.Type,
 					targetType = new SerializedType(t),
 					isVirtual = true,
 					displayName = t.Name,
@@ -692,9 +687,9 @@ namespace MaxyGames.UNode.Editors {
 		/// Read-only: generate virtual member entries for the given type favorite.
 		/// Visibility is driven by memberMode + excludedMembers. Never persisted.
 		/// </summary>
-		public static List<FavoritesDataAsset.FavoriteEntry> GetVirtualTypeMembers(FavoritesDataAsset.FavoriteEntry typeEntry) {
-			var result = new List<FavoritesDataAsset.FavoriteEntry>();
-			if(typeEntry == null || typeEntry.kind != FavoriteKind.Type || typeEntry.isVirtual)
+		public static List<NodeBrowserDataAsset.BrowserEntry> GetVirtualTypeMembers(NodeBrowserDataAsset.BrowserEntry typeEntry) {
+			var result = new List<NodeBrowserDataAsset.BrowserEntry>();
+			if(typeEntry == null || typeEntry.kind != NodeBrowserEntryKind.Type || typeEntry.isVirtual)
 				return result;
 			Type type = null;
 			try { type = typeEntry.resolvedType; } catch { }
@@ -707,9 +702,9 @@ namespace MaxyGames.UNode.Editors {
 				if(IsAccessorMethod(m)) continue;
 				if(!IsMemberVisibleIn(typeEntry, m))
 					continue;
-				result.Add(new FavoritesDataAsset.FavoriteEntry {
+				result.Add(new NodeBrowserDataAsset.BrowserEntry {
 					id = "[member]:" + declName + "::" + m.Name + "::" + m.MetadataToken,
-					kind = FavoriteKind.Member,
+					kind = NodeBrowserEntryKind.Member,
 					rawMember = m,
 					isVirtual = true,
 					displayName = m.Name,

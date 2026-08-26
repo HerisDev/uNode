@@ -18,21 +18,21 @@ namespace MaxyGames.UNode.Editors.UI {
 /// - OverItem  → nest the moved entry INSIDE the targeted row (folder),
 ///   matching GraphPanel's TreeViewUGraphElementDragAndDropController.
 /// - otherwise → resolve the slot via the callback and persist the move
-///   through FavoritesManager, then let the window rebuild the tree.
+///   through NodeBrowserManager, then let the window rebuild the tree.
 /// </summary>
 internal class FavoritesReorderController : TreeViewCustomDragAndDropController {
-	readonly Action<FavoritesDataAsset.FavoriteEntry, int, bool> onDrop;
+	readonly Action<NodeBrowserDataAsset.BrowserEntry, int, bool> onDrop;
 
-	public FavoritesReorderController(BaseTreeView view, Action<FavoritesDataAsset.FavoriteEntry, int, bool> onDrop) : base(view, null) {
+	public FavoritesReorderController(BaseTreeView view, Action<NodeBrowserDataAsset.BrowserEntry, int, bool> onDrop) : base(view, null) {
 		this.onDrop = onDrop;
 	}
 
 	public override void OnDrop(IListDragAndDropArgs args) {
 		// Read the dragged entry from the drag payload.
-		FavoritesDataAsset.FavoriteEntry movedEntry = null;
+		NodeBrowserDataAsset.BrowserEntry movedEntry = null;
 		try {
 			var data = DragAndDropUtility.dragAndDrop.data;
-			movedEntry = data?.GetGenericData("favoriteEntry") as FavoritesDataAsset.FavoriteEntry;
+			movedEntry = data?.GetGenericData("favoriteEntry") as NodeBrowserDataAsset.BrowserEntry;
 		} catch { }
 		if(movedEntry == null)
 			return;
